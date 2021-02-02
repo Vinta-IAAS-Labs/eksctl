@@ -20,6 +20,8 @@ const (
 	resourcesRootPath = "Resources"
 	outputsRootPath   = "Outputs"
 	mappingsRootPath  = "Mappings"
+	ourStackRegexFmt  = "^(eksctl|EKS)-%s-((cluster|nodegroup-.+|addon-.+|fargate)|(VPC|ServiceRole|ControlPlane|DefaultNodeGroup))$"
+	clusterStackRegex = "eksctl-.*-cluster"
 )
 
 var (
@@ -37,7 +39,7 @@ type StackInfo struct {
 	Template  *string
 }
 
-// TemplateData is an union (sum type) to describe template data.
+// TemplateData is a union (sum type) to describe template data.
 type TemplateData interface {
 	isTemplateData()
 }
@@ -86,7 +88,8 @@ func NewStackCollection(provider api.ClusterProvider, spec *api.ClusterConfig) *
 // DoCreateStackRequest requests the creation of a CloudFormation stack
 func (c *StackCollection) DoCreateStackRequest(i *Stack, templateData TemplateData, tags, parameters map[string]string, withIAM bool, withNamedIAM bool) error {
 	input := &cloudformation.CreateStackInput{
-		StackName: i.StackName,
+		StackName:       i.StackName,
+		DisableRollback: aws.Bool(c.provider.CloudFormationDisableRollback()),
 	}
 	input.Tags = append(input.Tags, c.sharedTags...)
 	for k, v := range tags {
@@ -222,7 +225,7 @@ func (c *StackCollection) GetManagedNodeGroupTemplate(nodeGroupName string) (str
 // UpdateNodeGroupStack updates the nodegroup stack with the specified template
 func (c *StackCollection) UpdateNodeGroupStack(nodeGroupName, template string) error {
 	stackName := c.makeNodeGroupStackName(nodeGroupName)
-	return c.UpdateStack(stackName, c.MakeChangeSetName("update-nodegroup"), "Update nodegroup stack", TemplateBody(template), nil)
+	return c.UpdateStack(stackName, c.MakeChangeSetName("update-nodegroup"), "updating nodegroup stack", TemplateBody(template), nil)
 }
 
 // ListStacksMatching gets all of CloudFormation stacks with names matching nameRegex.
@@ -262,6 +265,32 @@ func (c *StackCollection) ListStacksMatching(nameRegex string, statusFilters ...
 	if subErr != nil {
 		return nil, subErr
 	}
+	return stacks, nil
+}
+
+// ListStackNamesMatching gets all stack names matching regex
+func (c *StackCollection) ListClusterStackNames() ([]string, error) {
+	stacks := []string{}
+	re, err := regexp.Compile(clusterStackRegex)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot list stacks")
+	}
+	input := &cloudformation.ListStacksInput{
+		StackStatusFilter: defaultStackStatusFilter(),
+	}
+
+	pager := func(p *cloudformation.ListStacksOutput, _ bool) bool {
+		for _, s := range p.StackSummaries {
+			if re.MatchString(*s.StackName) {
+				stacks = append(stacks, *s.StackName)
+			}
+		}
+		return true
+	}
+	if err := c.provider.CloudFormation().ListStacksPages(input, pager); err != nil {
+		return nil, err
+	}
+
 	return stacks, nil
 }
 
@@ -363,17 +392,15 @@ func (c *StackCollection) DeleteStackByName(name string) (*Stack, error) {
 // DeleteStackByNameSync sends a request to delete the stack, and waits until status is DELETE_COMPLETE;
 // any errors will be written to errs channel, assume completion when nil is written, do not expect
 // more then one error value on the channel, it's closed immediately after it is written to
-func (c *StackCollection) DeleteStackByNameSync(name string, errs chan error) error {
-	i, err := c.DeleteStackByName(name)
+func (c *StackCollection) DeleteStackByNameSync(name string) error {
+	stack, err := c.DeleteStackByName(name)
 	if err != nil {
 		return err
 	}
 
-	logger.Info("waiting for stack %q to get deleted", *i.StackName)
+	logger.Info("waiting for stack %q to get deleted", *stack.StackName)
 
-	go c.waitUntilStackIsDeleted(i, errs)
-
-	return nil
+	return c.doWaitUntilStackIsDeleted(stack)
 }
 
 // DeleteStackBySpec sends a request to delete the stack
@@ -429,11 +456,10 @@ func (c *StackCollection) DeleteStackBySpecSync(s *Stack, errs chan error) error
 }
 
 func fmtStacksRegexForCluster(name string) string {
-	const ourStackRegexFmt = "^(eksctl|EKS)-%s-((cluster|nodegroup-.+|addon-.+)|(VPC|ServiceRole|ControlPlane|DefaultNodeGroup))$"
 	return fmt.Sprintf(ourStackRegexFmt, name)
 }
 
-func (c *StackCollection) errStackNotFound() error {
+func (c *StackCollection) ErrStackNotFound() error {
 	return fmt.Errorf("no eksctl-managed CloudFormation stacks found for %q", c.spec.Metadata.Name)
 }
 
@@ -444,9 +470,35 @@ func (c *StackCollection) DescribeStacks() ([]*Stack, error) {
 		return nil, errors.Wrapf(err, "describing CloudFormation stacks for %q", c.spec.Metadata.Name)
 	}
 	if len(stacks) == 0 {
-		return nil, c.errStackNotFound()
+		logger.Debug("No stacks found for %s", c.spec.Metadata.Name)
 	}
 	return stacks, nil
+}
+
+func (c *StackCollection) HasClusterStack() (bool, error) {
+	clusterStackNames, err := c.ListClusterStackNames()
+	if err != nil {
+		return false, err
+	}
+	return c.HasClusterStackUsingCachedList(clusterStackNames)
+}
+
+func (c *StackCollection) HasClusterStackUsingCachedList(clusterStackNames []string) (bool, error) {
+	clusterStackName := c.makeClusterStackName()
+	for _, stack := range clusterStackNames {
+		if stack == clusterStackName {
+			stack, err := c.DescribeStack(&cloudformation.Stack{StackName: &clusterStackName})
+			if err != nil {
+				return false, err
+			}
+			for _, tag := range stack.Tags {
+				if matchesClusterName(*tag.Key, *tag.Value, c.spec.Metadata.Name) {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
 }
 
 // DescribeStackEvents describes the events that have occurred on the stack

@@ -26,16 +26,16 @@ const (
 )
 
 // AssertFluxManifestsAbsentInGit asserts expected Flux manifests are not present in Git.
-func AssertFluxManifestsAbsentInGit(branch, privateSSHKeyPath string) {
-	dir, err := git.GetBranch(branch, privateSSHKeyPath)
+func AssertFluxManifestsAbsentInGit(branch string) {
+	dir, err := git.GetBranch(branch)
 	defer os.RemoveAll(dir)
 	Expect(err).ShouldNot(HaveOccurred())
 	assertDoesNotContainFluxDir(dir)
 }
 
 // AssertFluxManifestsPresentInGit asserts expected Flux manifests are present in Git.
-func AssertFluxManifestsPresentInGit(branch, privateSSHKeyPath string) {
-	dir, err := git.GetBranch(branch, privateSSHKeyPath)
+func AssertFluxManifestsPresentInGit(branch string) {
+	dir, err := git.GetBranch(branch)
 	defer os.RemoveAll(dir)
 	Expect(err).ShouldNot(HaveOccurred())
 	assertContainsFluxDir(dir)
@@ -161,7 +161,7 @@ func assertValidFluxDeploymentManifest(fileName string) {
 			Expect(deployment.Spec.Template.Spec.Containers).To(HaveLen(1))
 			container := deployment.Spec.Template.Spec.Containers[0]
 			Expect(container.Name).To(Equal("flux"))
-			Expect(container.Image).To(Equal("docker.io/fluxcd/flux:1.19.0"))
+			Expect(container.Image).To(HavePrefix("docker.io/fluxcd/flux"))
 		} else {
 			Fail(fmt.Sprintf("Unsupported Kubernetes object. Got %s object with version %s in: %s", gvk.Kind, gvk.Version, fileName))
 		}
@@ -335,7 +335,7 @@ func assertValidHelmOperatorDeployment(fileName string) {
 			Expect(deployment.Spec.Template.Spec.Containers).To(HaveLen(1))
 			container := deployment.Spec.Template.Spec.Containers[0]
 			Expect(container.Name).To(Equal("helm-operator"))
-			Expect(container.Image).To(Equal("docker.io/fluxcd/helm-operator:1.0.0"))
+			Expect(container.Image).To(HavePrefix("docker.io/fluxcd/helm-operator"))
 		} else {
 			Fail(fmt.Sprintf("Unsupported Kubernetes object. Got %s object with version %s in: %s", gvk.Kind, gvk.Version, fileName))
 		}

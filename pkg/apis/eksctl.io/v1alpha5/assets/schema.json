@@ -3,6 +3,75 @@
   "type": "object",
   "$schema": "http://json-schema-org/draft-07/schema#",
   "definitions": {
+    "AZSubnetMapping": {
+      "additionalProperties": {
+        "$ref": "#/definitions/AZSubnetSpec"
+      },
+      "type": "object",
+      "description": "holds subnet to AZ mappings. If the key is an AZ, that also becomes the name of the subnet otherwise use the key to refer to this subnet.",
+      "x-intellij-html-description": "holds subnet to AZ mappings. If the key is an AZ, that also becomes the name of the subnet otherwise use the key to refer to this subnet.",
+      "default": "{}"
+    },
+    "AZSubnetSpec": {
+      "properties": {
+        "az": {
+          "type": "string",
+          "description": "can be omitted if the key is an AZ",
+          "x-intellij-html-description": "can be omitted if the key is an AZ"
+        },
+        "cidr": {
+          "$ref": "#/definitions/github.com|weaveworks|eksctl|pkg|utils|ipnet.IPNet"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "preferredOrder": [
+        "id",
+        "az",
+        "cidr"
+      ],
+      "additionalProperties": false
+    },
+    "Addon": {
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "attachPolicy": {
+          "$ref": "#/definitions/InlineDocument",
+          "description": "holds a policy document to attach to this service account",
+          "x-intellij-html-description": "holds a policy document to attach to this service account"
+        },
+        "attachPolicyARNs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "list of ARNs of the IAM policies to attach",
+          "x-intellij-html-description": "list of ARNs of the IAM policies to attach"
+        },
+        "name": {
+          "type": "string"
+        },
+        "serviceAccountRoleARN": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "preferredOrder": [
+        "name",
+        "version",
+        "serviceAccountRoleARN",
+        "attachPolicyARNs",
+        "attachPolicy"
+      ],
+      "additionalProperties": false,
+      "description": "holds the EKS addon configuration",
+      "x-intellij-html-description": "holds the EKS addon configuration"
+    },
     "ClusterCloudWatch": {
       "properties": {
         "clusterLogging": {
@@ -21,11 +90,17 @@
         "enableTypes": {
           "items": {
             "type": "string",
-            "default": ""
+            "enum": [
+              "api",
+              "audit",
+              "authenticator",
+              "controllerManager",
+              "scheduler"
+            ]
           },
           "type": "array",
-          "description": "Types of logging to enable (see [CloudWatch docs](/usage/cloudwatch-cluster-logging/#clusterconfig-examples)). To choose from: `api`, `audit`, `authenticator`, `controllerManager`, `scheduler`",
-          "x-intellij-html-description": "Types of logging to enable (see <a href=\"/usage/cloudwatch-cluster-logging/#clusterconfig-examples\">CloudWatch docs</a>). To choose from: <code>api</code>, <code>audit</code>, <code>authenticator</code>, <code>controllerManager</code>, <code>scheduler</code>"
+          "description": "Types of logging to enable (see [CloudWatch docs](/usage/cloudwatch-cluster-logging/#clusterconfig-examples)). Valid entries are: `\"api\"`, `\"audit\"`, `\"authenticator\"`, `\"controllerManager\"`, `\"scheduler\"`.",
+          "x-intellij-html-description": "Types of logging to enable (see <a href=\"/usage/cloudwatch-cluster-logging/#clusterconfig-examples\">CloudWatch docs</a>). Valid entries are: <code>&quot;api&quot;</code>, <code>&quot;audit&quot;</code>, <code>&quot;authenticator&quot;</code>, <code>&quot;controllerManager&quot;</code>, <code>&quot;scheduler&quot;</code>."
         }
       },
       "preferredOrder": [
@@ -42,17 +117,21 @@
         "apiVersion"
       ],
       "properties": {
+        "addons": {
+          "items": {
+            "$ref": "#/definitions/Addon"
+          },
+          "type": "array"
+        },
         "apiVersion": {
           "type": "string",
-          "default": "",
           "enum": [
             "eksctl.io/v1alpha5"
           ]
         },
         "availabilityZones": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "array"
         },
@@ -75,10 +154,12 @@
         },
         "kind": {
           "type": "string",
-          "default": "",
           "enum": [
             "ClusterConfig"
           ]
+        },
+        "kubernetesNetworkConfig": {
+          "$ref": "#/definitions/KubernetesNetworkConfig"
         },
         "managedNodeGroups": {
           "items": {
@@ -118,8 +199,10 @@
         "kind",
         "apiVersion",
         "metadata",
+        "kubernetesNetworkConfig",
         "iam",
         "vpc",
+        "addons",
         "privateCluster",
         "nodeGroups",
         "managedNodeGroups",
@@ -132,7 +215,14 @@
       ],
       "additionalProperties": false,
       "description": "a simple config, to be replaced with Cluster API",
-      "x-intellij-html-description": "a simple config, to be replaced with Cluster API"
+      "x-intellij-html-description": "a simple config, to be replaced with Cluster API",
+      "x-kubernetes-group-version-kind": [
+        {
+          "group": "eksctl.io",
+          "version": "v1alpha5",
+          "kind": "ClusterConfig"
+        }
+      ]
     },
     "ClusterEndpoints": {
       "properties": {
@@ -154,25 +244,41 @@
     "ClusterIAM": {
       "properties": {
         "fargatePodExecutionRoleARN": {
-          "type": "string"
+          "type": "string",
+          "description": "role used by pods to access AWS APIs. This role is added to the Kubernetes RBAC for authorization. See [Pod Execution Role](https://docs.aws.amazon.com/eks/latest/userguide/pod-execution-role.html)",
+          "x-intellij-html-description": "role used by pods to access AWS APIs. This role is added to the Kubernetes RBAC for authorization. See <a href=\"https://docs.aws.amazon.com/eks/latest/userguide/pod-execution-role.html\">Pod Execution Role</a>"
         },
         "fargatePodExecutionRolePermissionsBoundary": {
-          "type": "string"
+          "type": "string",
+          "description": "permissions boundary for the fargate pod execution role`. See [EKS Fargate Support](/usage/fargate-support/)",
+          "x-intellij-html-description": "permissions boundary for the fargate pod execution role`. See <a href=\"/usage/fargate-support/\">EKS Fargate Support</a>"
         },
         "serviceAccounts": {
           "items": {
             "$ref": "#/definitions/ClusterIAMServiceAccount"
           },
-          "type": "array"
+          "type": "array",
+          "description": "service accounts to create in the cluster. See [IAM Service Accounts](/iamserviceaccounts/#usage-with-config-files)",
+          "x-intellij-html-description": "service accounts to create in the cluster. See <a href=\"/iamserviceaccounts/#usage-with-config-files\">IAM Service Accounts</a>"
         },
         "serviceRoleARN": {
           "type": "string"
         },
         "serviceRolePermissionsBoundary": {
-          "type": "string"
+          "type": "string",
+          "description": "permissions boundary for all identity-based entities created by eksctl. See [AWS Permission Boundary](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries.html)",
+          "x-intellij-html-description": "permissions boundary for all identity-based entities created by eksctl. See <a href=\"https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries.html\">AWS Permission Boundary</a>"
+        },
+        "vpcResourceControllerPolicy": {
+          "type": "boolean",
+          "description": "attaches the IAM policy necessary to run the VPC controller in the control plane",
+          "x-intellij-html-description": "attaches the IAM policy necessary to run the VPC controller in the control plane",
+          "default": true
         },
         "withOIDC": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "enables the IAM OIDC provider as well as IRSA for the Amazon CNI plugin",
+          "x-intellij-html-description": "enables the IAM OIDC provider as well as IRSA for the Amazon CNI plugin"
         }
       },
       "preferredOrder": [
@@ -181,7 +287,8 @@
         "fargatePodExecutionRoleARN",
         "fargatePodExecutionRolePermissionsBoundary",
         "withOIDC",
-        "serviceAccounts"
+        "serviceAccounts",
+        "vpcResourceControllerPolicy"
       ],
       "additionalProperties": false,
       "description": "holds all IAM attributes of a cluster",
@@ -191,8 +298,7 @@
       "properties": {
         "annotations": {
           "additionalProperties": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "object",
           "default": "{}"
@@ -204,41 +310,49 @@
         },
         "attachPolicyARNs": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
-          "type": "array"
+          "type": "array",
+          "description": "list of ARNs of the IAM policies to attach",
+          "x-intellij-html-description": "list of ARNs of the IAM policies to attach"
         },
         "labels": {
           "additionalProperties": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "object",
           "default": "{}"
         },
         "name": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         },
         "namespace": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         },
         "permissionsBoundary": {
           "type": "string",
-          "default": ""
+          "description": "ARN of the permissions boundary to associate with the service account",
+          "x-intellij-html-description": "ARN of the permissions boundary to associate with the service account"
+        },
+        "roleName": {
+          "type": "string",
+          "description": "Specific role name instead of the Cloudformation-generated role name",
+          "x-intellij-html-description": "Specific role name instead of the Cloudformation-generated role name"
         },
         "status": {
           "$ref": "#/definitions/ClusterIAMServiceAccountStatus"
         },
         "tags": {
           "additionalProperties": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "object",
+          "description": "AWS tags for the service account",
+          "x-intellij-html-description": "AWS tags for the service account",
           "default": "{}"
+        },
+        "wellKnownPolicies": {
+          "$ref": "#/definitions/WellKnownPolicies"
         }
       },
       "preferredOrder": [
@@ -247,9 +361,11 @@
         "labels",
         "annotations",
         "attachPolicyARNs",
+        "wellKnownPolicies",
         "attachPolicy",
         "permissionsBoundary",
         "status",
+        "roleName",
         "tags"
       ],
       "additionalProperties": false,
@@ -275,32 +391,45 @@
         "region"
       ],
       "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "arbitrary metadata ignored by `eksctl`.",
+          "x-intellij-html-description": "arbitrary metadata ignored by <code>eksctl</code>.",
+          "default": "{}"
+        },
         "name": {
           "type": "string",
-          "default": ""
+          "description": "of the cluster",
+          "x-intellij-html-description": "of the cluster"
         },
         "region": {
           "type": "string",
-          "default": ""
+          "description": "the AWS region hosting this cluster",
+          "x-intellij-html-description": "the AWS region hosting this cluster"
         },
         "tags": {
           "additionalProperties": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "object",
+          "description": "used to tag AWS resources created by eksctl",
+          "x-intellij-html-description": "used to tag AWS resources created by eksctl",
           "default": "{}"
         },
         "version": {
           "type": "string",
-          "description": "Valid variants are: `\"1.14\"`, `\"1.15\"`, `\"1.16\"`, `\"1.17\"` (default).",
-          "x-intellij-html-description": "Valid variants are: <code>&quot;1.14&quot;</code>, <code>&quot;1.15&quot;</code>, <code>&quot;1.16&quot;</code>, <code>&quot;1.17&quot;</code> (default).",
-          "default": "1.17",
+          "description": "Valid variants are: `\"1.14\"`, `\"1.15\"`, `\"1.16\"`, `\"1.17\"`, `\"1.18\"` (default).",
+          "x-intellij-html-description": "Valid variants are: <code>&quot;1.14&quot;</code>, <code>&quot;1.15&quot;</code>, <code>&quot;1.16&quot;</code>, <code>&quot;1.17&quot;</code>, <code>&quot;1.18&quot;</code> (default).",
+          "default": "1.18",
           "enum": [
             "1.14",
             "1.15",
             "1.16",
-            "1.17"
+            "1.17",
+            "1.18"
           ]
         }
       },
@@ -308,7 +437,8 @@
         "name",
         "region",
         "version",
-        "tags"
+        "tags",
+        "annotations"
       ],
       "additionalProperties": false,
       "description": "contains general cluster information",
@@ -317,42 +447,52 @@
     "ClusterNAT": {
       "properties": {
         "gateway": {
-          "type": "string"
+          "type": "string",
+          "description": "Valid variants are: `\"HighlyAvailable\"` configures a highly available NAT gateway, `\"Single\"` configures a single NAT gateway (default), `\"Disable\"` disables NAT.",
+          "x-intellij-html-description": "Valid variants are: <code>&quot;HighlyAvailable&quot;</code> configures a highly available NAT gateway, <code>&quot;Single&quot;</code> configures a single NAT gateway (default), <code>&quot;Disable&quot;</code> disables NAT.",
+          "default": "Single",
+          "enum": [
+            "HighlyAvailable",
+            "Single",
+            "Disable"
+          ]
         }
       },
       "preferredOrder": [
         "gateway"
       ],
       "additionalProperties": false,
-      "description": "holds NAT gateway configuration options",
-      "x-intellij-html-description": "holds NAT gateway configuration options"
+      "description": "NAT config",
+      "x-intellij-html-description": "NAT config"
     },
     "ClusterStatus": {
       "properties": {
         "arn": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         },
         "certificateAuthorityData": {
           "items": {
-            "type": "string"
+            "type": "string",
+            "contentEncoding": "base64"
           },
           "type": "array"
         },
+        "eksctlCreated": {
+          "$ref": "#/definitions/EKSCTLCreated"
+        },
         "endpoint": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         },
         "stackName": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         }
       },
       "preferredOrder": [
         "endpoint",
         "certificateAuthorityData",
         "arn",
-        "stackName"
+        "stackName",
+        "eksctlCreated"
       ],
       "additionalProperties": false,
       "description": "hold read-only attributes of a cluster",
@@ -361,18 +501,10 @@
     "ClusterSubnets": {
       "properties": {
         "private": {
-          "additionalProperties": {
-            "$ref": "#/definitions/Network"
-          },
-          "type": "object",
-          "default": "{}"
+          "$ref": "#/definitions/AZSubnetMapping"
         },
         "public": {
-          "additionalProperties": {
-            "$ref": "#/definitions/Network"
-          },
-          "type": "object",
-          "default": "{}"
+          "$ref": "#/definitions/AZSubnetMapping"
         }
       },
       "preferredOrder": [
@@ -386,50 +518,54 @@
     "ClusterVPC": {
       "properties": {
         "autoAllocateIPv6": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "AutoAllocateIPV6 requests an IPv6 CIDR block with /56 prefix for the VPC",
+          "x-intellij-html-description": "AutoAllocateIPV6 requests an IPv6 CIDR block with /56 prefix for the VPC"
         },
         "cidr": {
           "$ref": "#/definitions/github.com|weaveworks|eksctl|pkg|utils|ipnet.IPNet"
         },
         "clusterEndpoints": {
-          "$ref": "#/definitions/ClusterEndpoints"
+          "$ref": "#/definitions/ClusterEndpoints",
+          "description": "See [managing access to API](/usage/vpc-networking/#managing-access-to-the-kubernetes-api-server-endpoints)",
+          "x-intellij-html-description": "See <a href=\"/usage/vpc-networking/#managing-access-to-the-kubernetes-api-server-endpoints\">managing access to API</a>"
         },
         "extraCIDRs": {
           "items": {
             "$ref": "#/definitions/github.com|weaveworks|eksctl|pkg|utils|ipnet.IPNet"
           },
           "type": "array",
-          "description": "for additional CIDR associations, e.g. to use with separate CIDR for private subnets or any ad-hoc subnets",
-          "x-intellij-html-description": "for additional CIDR associations, e.g. to use with separate CIDR for private subnets or any ad-hoc subnets"
+          "description": "for additional CIDR associations, e.g. a CIDR for private subnets or any ad-hoc subnets",
+          "x-intellij-html-description": "for additional CIDR associations, e.g. a CIDR for private subnets or any ad-hoc subnets"
         },
         "id": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         },
         "nat": {
           "$ref": "#/definitions/ClusterNAT"
         },
         "publicAccessCIDRs": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
-          "type": "array"
+          "type": "array",
+          "description": "which CIDR blocks to allow access to public k8s API endpoint",
+          "x-intellij-html-description": "which CIDR blocks to allow access to public k8s API endpoint"
         },
         "securityGroup": {
           "type": "string",
-          "default": ""
+          "description": "for communication between control plane and nodes",
+          "x-intellij-html-description": "for communication between control plane and nodes"
         },
         "sharedNodeSecurityGroup": {
           "type": "string",
           "description": "for pre-defined shared node SG",
-          "x-intellij-html-description": "for pre-defined shared node SG",
-          "default": ""
+          "x-intellij-html-description": "for pre-defined shared node SG"
         },
         "subnets": {
           "$ref": "#/definitions/ClusterSubnets",
-          "description": "subnets are either public or private for use with separate nodegroups, these are keyed by AZ for convenience",
-          "x-intellij-html-description": "subnets are either public or private for use with separate nodegroups, these are keyed by AZ for convenience"
+          "description": "keyed by AZ for convenience. See [this example](/examples/reusing-iam-and-vpc/) as well as [using existing VPCs](/usage/vpc-networking/#use-existing-vpc-other-custom-configuration).",
+          "x-intellij-html-description": "keyed by AZ for convenience. See <a href=\"/examples/reusing-iam-and-vpc/\">this example</a> as well as <a href=\"/usage/vpc-networking/#use-existing-vpc-other-custom-configuration\">using existing VPCs</a>."
         }
       },
       "preferredOrder": [
@@ -445,8 +581,11 @@
         "publicAccessCIDRs"
       ],
       "additionalProperties": false,
-      "description": "holds global subnet and all child public/private subnet",
-      "x-intellij-html-description": "holds global subnet and all child public/private subnet"
+      "description": "holds global subnet and all child subnets",
+      "x-intellij-html-description": "holds global subnet and all child subnets"
+    },
+    "EKSCTLCreated": {
+      "type": "string"
     },
     "FargateProfile": {
       "required": [
@@ -456,14 +595,12 @@
         "name": {
           "type": "string",
           "description": "of the Fargate profile.",
-          "x-intellij-html-description": "of the Fargate profile.",
-          "default": ""
+          "x-intellij-html-description": "of the Fargate profile."
         },
         "podExecutionRoleARN": {
           "type": "string",
           "description": "IAM role's ARN to use to run pods onto Fargate.",
-          "x-intellij-html-description": "IAM role's ARN to use to run pods onto Fargate.",
-          "default": ""
+          "x-intellij-html-description": "IAM role's ARN to use to run pods onto Fargate."
         },
         "selectors": {
           "items": {
@@ -473,10 +610,14 @@
           "description": "define the rules to select workload to schedule onto Fargate.",
           "x-intellij-html-description": "define the rules to select workload to schedule onto Fargate."
         },
+        "status": {
+          "type": "string",
+          "description": "The current status of the Fargate profile.",
+          "x-intellij-html-description": "The current status of the Fargate profile."
+        },
         "subnets": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "array",
           "description": "which Fargate should use to do network placement of the selected workload. If none provided, all subnets for the cluster will be used.",
@@ -484,8 +625,7 @@
         },
         "tags": {
           "additionalProperties": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "object",
           "description": "Used to tag the AWS resources",
@@ -498,7 +638,8 @@
         "podExecutionRoleARN",
         "selectors",
         "subnets",
-        "tags"
+        "tags",
+        "status"
       ],
       "additionalProperties": false,
       "description": "defines the settings used to schedule workload onto Fargate.",
@@ -511,8 +652,7 @@
       "properties": {
         "labels": {
           "additionalProperties": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "object",
           "description": "Kubernetes label selectors to use to select workload.",
@@ -522,8 +662,7 @@
         "namespace": {
           "type": "string",
           "description": "Kubernetes namespace from which to select workload.",
-          "x-intellij-html-description": "Kubernetes namespace from which to select workload.",
-          "default": ""
+          "x-intellij-html-description": "Kubernetes namespace from which to select workload."
         }
       },
       "preferredOrder": [
@@ -568,21 +707,80 @@
       "x-intellij-html-description": "holds any arbitrary JSON/YAML documents, such as extra config parameters or IAM policies",
       "default": "{}"
     },
+    "KubernetesNetworkConfig": {
+      "properties": {
+        "serviceIPv4CIDR": {
+          "type": "string",
+          "description": "CIDR range from where `ClusterIP`s are assigned",
+          "x-intellij-html-description": "CIDR range from where <code>ClusterIP</code>s are assigned"
+        }
+      },
+      "preferredOrder": [
+        "serviceIPv4CIDR"
+      ],
+      "additionalProperties": false,
+      "description": "contains cluster networking options",
+      "x-intellij-html-description": "contains cluster networking options"
+    },
+    "LaunchTemplate": {
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Launch template ID",
+          "x-intellij-html-description": "Launch template ID"
+        },
+        "version": {
+          "type": "string",
+          "description": "Launch template version Defaults to the default launch template version TODO support $Default, $Latest",
+          "x-intellij-html-description": "Launch template version Defaults to the default launch template version TODO support $Default, $Latest"
+        }
+      },
+      "preferredOrder": [
+        "id",
+        "version"
+      ],
+      "additionalProperties": false
+    },
     "ManagedNodeGroup": {
       "required": [
         "name"
       ],
       "properties": {
+        "ami": {
+          "type": "string",
+          "description": "Specify [custom AMIs](/usage/custom-ami-support/), `auto-ssm`, `auto`, or `static`",
+          "x-intellij-html-description": "Specify <a href=\"/usage/custom-ami-support/\">custom AMIs</a>, <code>auto-ssm</code>, <code>auto</code>, or <code>static</code>"
+        },
         "amiFamily": {
           "type": "string",
-          "description": "Specify [custom AMIs](/usage/custom-ami-support/), \"auto-ssm\", \"auto\", or \"static\"",
-          "x-intellij-html-description": "Specify <a href=\"/usage/custom-ami-support/\">custom AMIs</a>, &quot;auto-ssm&quot;, &quot;auto&quot;, or &quot;static&quot;",
-          "default": ""
+          "description": "Valid variants are: `\"AmazonLinux2\"` (default), `\"Ubuntu2004\"`, `\"Ubuntu1804\"`, `\"Bottlerocket\"`, `\"WindowsServer2019CoreContainer\"`, `\"WindowsServer2019FullContainer\"`, `\"WindowsServer1909CoreContainer\"`, `\"WindowsServer2004CoreContainer\"`.",
+          "x-intellij-html-description": "Valid variants are: <code>&quot;AmazonLinux2&quot;</code> (default), <code>&quot;Ubuntu2004&quot;</code>, <code>&quot;Ubuntu1804&quot;</code>, <code>&quot;Bottlerocket&quot;</code>, <code>&quot;WindowsServer2019CoreContainer&quot;</code>, <code>&quot;WindowsServer2019FullContainer&quot;</code>, <code>&quot;WindowsServer1909CoreContainer&quot;</code>, <code>&quot;WindowsServer2004CoreContainer&quot;</code>.",
+          "default": "AmazonLinux2",
+          "enum": [
+            "AmazonLinux2",
+            "Ubuntu2004",
+            "Ubuntu1804",
+            "Bottlerocket",
+            "WindowsServer2019CoreContainer",
+            "WindowsServer2019FullContainer",
+            "WindowsServer1909CoreContainer",
+            "WindowsServer2004CoreContainer"
+          ]
+        },
+        "asgSuspendProcesses": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "See [relevant AWS docs](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-attribute-updatepolicy.html#cfn-attributes-updatepolicy-rollingupdate-suspendprocesses)",
+          "x-intellij-html-description": "See <a href=\"https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-attribute-updatepolicy.html#cfn-attributes-updatepolicy-rollingupdate-suspendprocesses\">relevant AWS docs</a>"
         },
         "availabilityZones": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "array",
           "description": "Limit [nodes to specific AZs](/usage/autoscaling/#zone-aware-auto-scaling)",
@@ -591,20 +789,57 @@
         "desiredCapacity": {
           "type": "integer"
         },
+        "disableIMDSv1": {
+          "type": "boolean",
+          "description": "requires requests to the metadata service to use IMDSv2 tokens",
+          "x-intellij-html-description": "requires requests to the metadata service to use IMDSv2 tokens",
+          "default": false
+        },
+        "disablePodIMDS": {
+          "type": "boolean",
+          "description": "blocks all IMDS requests from non host networking pods",
+          "x-intellij-html-description": "blocks all IMDS requests from non host networking pods",
+          "default": false
+        },
+        "ebsOptimized": {
+          "type": "boolean",
+          "description": "enables [EBS optimization](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-optimized.html)",
+          "x-intellij-html-description": "enables <a href=\"https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-optimized.html\">EBS optimization</a>"
+        },
         "iam": {
           "$ref": "#/definitions/NodeGroupIAM"
         },
+        "instanceName": {
+          "type": "string"
+        },
+        "instancePrefix": {
+          "type": "string"
+        },
         "instanceType": {
-          "type": "string",
-          "default": ""
+          "type": "string"
+        },
+        "instanceTypes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "specifies a list of instance types",
+          "x-intellij-html-description": "specifies a list of instance types"
         },
         "labels": {
           "additionalProperties": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "object",
           "default": "{}"
+        },
+        "launchTemplate": {
+          "$ref": "#/definitions/LaunchTemplate",
+          "description": "specifies an existing launch template to use for the nodegroup",
+          "x-intellij-html-description": "specifies an existing launch template to use for the nodegroup"
+        },
+        "maxPodsPerNode": {
+          "type": "integer"
         },
         "maxSize": {
           "type": "integer"
@@ -613,8 +848,25 @@
           "type": "integer"
         },
         "name": {
+          "type": "string"
+        },
+        "overrideBootstrapCommand": {
           "type": "string",
-          "default": ""
+          "description": "Override `eksctl`'s bootstrapping script",
+          "x-intellij-html-description": "Override <code>eksctl</code>'s bootstrapping script"
+        },
+        "placement": {
+          "$ref": "#/definitions/Placement",
+          "description": "specifies the placement group in which nodes should be spawned",
+          "x-intellij-html-description": "specifies the placement group in which nodes should be spawned"
+        },
+        "preBootstrapCommands": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "executed before bootstrapping instances to the cluster",
+          "x-intellij-html-description": "executed before bootstrapping instances to the cluster"
         },
         "privateNetworking": {
           "type": "boolean",
@@ -622,22 +874,68 @@
           "x-intellij-html-description": "Enable <a href=\"/usage/vpc-networking/#use-private-subnets-for-initial-nodegroup\">private networking</a> for nodegroup",
           "default": "false"
         },
+        "securityGroups": {
+          "$ref": "#/definitions/NodeGroupSGs"
+        },
+        "spot": {
+          "type": "boolean",
+          "description": "creates a spot nodegroup",
+          "x-intellij-html-description": "creates a spot nodegroup",
+          "default": "false"
+        },
         "ssh": {
-          "$ref": "#/definitions/NodeGroupSSH"
+          "$ref": "#/definitions/NodeGroupSSH",
+          "description": "configures ssh access for this nodegroup",
+          "x-intellij-html-description": "configures ssh access for this nodegroup"
+        },
+        "subnets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Limit nodes to specific subnets",
+          "x-intellij-html-description": "Limit nodes to specific subnets"
         },
         "tags": {
           "additionalProperties": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "object",
           "default": "{}"
+        },
+        "volumeEncrypted": {
+          "type": "boolean"
+        },
+        "volumeIOPS": {
+          "type": "integer"
+        },
+        "volumeKmsKeyID": {
+          "type": "string"
+        },
+        "volumeName": {
+          "type": "string"
         },
         "volumeSize": {
           "type": "integer",
           "description": "gigabytes",
           "x-intellij-html-description": "gigabytes",
-          "default": "80"
+          "default": 80
+        },
+        "volumeThroughput": {
+          "type": "integer"
+        },
+        "volumeType": {
+          "type": "string",
+          "description": "Valid variants are: `\"gp2\"` is General Purpose SSD, `\"gp3\"` is General Purpose SSD which can be optimised for high throughput (default), `\"io1\"` is Provisioned IOPS SSD, `\"sc1\"` is Cold HDD, `\"st1\"` is Throughput Optimized HDD.",
+          "x-intellij-html-description": "Valid variants are: <code>&quot;gp2&quot;</code> is General Purpose SSD, <code>&quot;gp3&quot;</code> is General Purpose SSD which can be optimised for high throughput (default), <code>&quot;io1&quot;</code> is Provisioned IOPS SSD, <code>&quot;sc1&quot;</code> is Cold HDD, <code>&quot;st1&quot;</code> is Throughput Optimized HDD.",
+          "default": "gp3",
+          "enum": [
+            "gp2",
+            "gp3",
+            "io1",
+            "sc1",
+            "st1"
+          ]
         }
       },
       "preferredOrder": [
@@ -645,6 +943,9 @@
         "amiFamily",
         "instanceType",
         "availabilityZones",
+        "subnets",
+        "instancePrefix",
+        "instanceName",
         "desiredCapacity",
         "minSize",
         "maxSize",
@@ -653,8 +954,28 @@
         "labels",
         "privateNetworking",
         "tags",
-        "iam"
+        "iam",
+        "ami",
+        "securityGroups",
+        "maxPodsPerNode",
+        "asgSuspendProcesses",
+        "ebsOptimized",
+        "volumeType",
+        "volumeName",
+        "volumeEncrypted",
+        "volumeKmsKeyID",
+        "volumeIOPS",
+        "volumeThroughput",
+        "preBootstrapCommands",
+        "overrideBootstrapCommand",
+        "disableIMDSv1",
+        "disablePodIMDS",
+        "placement",
+        "instanceTypes",
+        "spot",
+        "launchTemplate"
       ],
+      "additionalProperties": false,
       "description": "represents an EKS-managed nodegroup TODO Validate for unmapped fields and throw an error",
       "x-intellij-html-description": "represents an EKS-managed nodegroup TODO Validate for unmapped fields and throw an error"
     },
@@ -664,13 +985,11 @@
       ],
       "properties": {
         "granularity": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         },
         "metrics": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "array"
         }
@@ -683,24 +1002,6 @@
       "description": "used by the scaling config, see [cloudformation docs](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-as-metricscollection.html)",
       "x-intellij-html-description": "used by the scaling config, see <a href=\"https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-as-metricscollection.html\">cloudformation docs</a>"
     },
-    "Network": {
-      "properties": {
-        "cidr": {
-          "$ref": "#/definitions/github.com|weaveworks|eksctl|pkg|utils|ipnet.IPNet"
-        },
-        "id": {
-          "type": "string",
-          "default": ""
-        }
-      },
-      "preferredOrder": [
-        "id",
-        "cidr"
-      ],
-      "additionalProperties": false,
-      "description": "holds ID and CIDR",
-      "x-intellij-html-description": "holds ID and CIDR"
-    },
     "NodeGroup": {
       "required": [
         "name"
@@ -708,13 +1009,24 @@
       "properties": {
         "ami": {
           "type": "string",
-          "default": ""
+          "description": "Specify [custom AMIs](/usage/custom-ami-support/), `auto-ssm`, `auto`, or `static`",
+          "x-intellij-html-description": "Specify <a href=\"/usage/custom-ami-support/\">custom AMIs</a>, <code>auto-ssm</code>, <code>auto</code>, or <code>static</code>"
         },
         "amiFamily": {
           "type": "string",
-          "description": "Specify [custom AMIs](/usage/custom-ami-support/), \"auto-ssm\", \"auto\", or \"static\"",
-          "x-intellij-html-description": "Specify <a href=\"/usage/custom-ami-support/\">custom AMIs</a>, &quot;auto-ssm&quot;, &quot;auto&quot;, or &quot;static&quot;",
-          "default": ""
+          "description": "Valid variants are: `\"AmazonLinux2\"` (default), `\"Ubuntu2004\"`, `\"Ubuntu1804\"`, `\"Bottlerocket\"`, `\"WindowsServer2019CoreContainer\"`, `\"WindowsServer2019FullContainer\"`, `\"WindowsServer1909CoreContainer\"`, `\"WindowsServer2004CoreContainer\"`.",
+          "x-intellij-html-description": "Valid variants are: <code>&quot;AmazonLinux2&quot;</code> (default), <code>&quot;Ubuntu2004&quot;</code>, <code>&quot;Ubuntu1804&quot;</code>, <code>&quot;Bottlerocket&quot;</code>, <code>&quot;WindowsServer2019CoreContainer&quot;</code>, <code>&quot;WindowsServer2019FullContainer&quot;</code>, <code>&quot;WindowsServer1909CoreContainer&quot;</code>, <code>&quot;WindowsServer2004CoreContainer&quot;</code>.",
+          "default": "AmazonLinux2",
+          "enum": [
+            "AmazonLinux2",
+            "Ubuntu2004",
+            "Ubuntu1804",
+            "Bottlerocket",
+            "WindowsServer2019CoreContainer",
+            "WindowsServer2019FullContainer",
+            "WindowsServer1909CoreContainer",
+            "WindowsServer2004CoreContainer"
+          ]
         },
         "asgMetricsCollection": {
           "items": {
@@ -722,24 +1034,28 @@
           },
           "type": "array"
         },
+        "asgSuspendProcesses": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "See [relevant AWS docs](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-attribute-updatepolicy.html#cfn-attributes-updatepolicy-rollingupdate-suspendprocesses)",
+          "x-intellij-html-description": "See <a href=\"https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-attribute-updatepolicy.html#cfn-attributes-updatepolicy-rollingupdate-suspendprocesses\">relevant AWS docs</a>"
+        },
         "availabilityZones": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "array",
           "description": "Limit [nodes to specific AZs](/usage/autoscaling/#zone-aware-auto-scaling)",
           "x-intellij-html-description": "Limit <a href=\"/usage/autoscaling/#zone-aware-auto-scaling\">nodes to specific AZs</a>"
         },
         "bottlerocket": {
-          "$ref": "#/definitions/NodeGroupBottlerocket",
-          "description": "SSH configures ssh access for this nodegroup",
-          "x-intellij-html-description": "SSH configures ssh access for this nodegroup"
+          "$ref": "#/definitions/NodeGroupBottlerocket"
         },
         "classicLoadBalancerNames": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "array",
           "description": "Associate load balancers with auto scaling group",
@@ -748,8 +1064,7 @@
         "clusterDNS": {
           "type": "string",
           "description": "[Custom address](/usage/vpc-networking/#custom-cluster-dns-address) used for DNS lookups",
-          "x-intellij-html-description": "<a href=\"/usage/vpc-networking/#custom-cluster-dns-address\">Custom address</a> used for DNS lookups",
-          "default": ""
+          "x-intellij-html-description": "<a href=\"/usage/vpc-networking/#custom-cluster-dns-address\">Custom address</a> used for DNS lookups"
         },
         "cpuCredits": {
           "type": "string",
@@ -763,7 +1078,13 @@
           "type": "boolean",
           "description": "requires requests to the metadata service to use IMDSv2 tokens",
           "x-intellij-html-description": "requires requests to the metadata service to use IMDSv2 tokens",
-          "default": "false"
+          "default": false
+        },
+        "disablePodIMDS": {
+          "type": "boolean",
+          "description": "blocks all IMDS requests from non host networking pods",
+          "x-intellij-html-description": "blocks all IMDS requests from non host networking pods",
+          "default": false
         },
         "ebsOptimized": {
           "type": "boolean",
@@ -774,16 +1095,13 @@
           "$ref": "#/definitions/NodeGroupIAM"
         },
         "instanceName": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         },
         "instancePrefix": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         },
         "instanceType": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         },
         "instancesDistribution": {
           "$ref": "#/definitions/NodeGroupInstancesDistribution"
@@ -795,8 +1113,7 @@
         },
         "labels": {
           "additionalProperties": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "object",
           "default": "{}"
@@ -811,18 +1128,21 @@
           "type": "integer"
         },
         "name": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         },
         "overrideBootstrapCommand": {
           "type": "string",
           "description": "Override `eksctl`'s bootstrapping script",
           "x-intellij-html-description": "Override <code>eksctl</code>'s bootstrapping script"
         },
+        "placement": {
+          "$ref": "#/definitions/Placement",
+          "description": "specifies the placement group in which nodes should be spawned",
+          "x-intellij-html-description": "specifies the placement group in which nodes should be spawned"
+        },
         "preBootstrapCommands": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "array",
           "description": "executed before bootstrapping instances to the cluster",
@@ -838,28 +1158,35 @@
           "$ref": "#/definitions/NodeGroupSGs"
         },
         "ssh": {
-          "$ref": "#/definitions/NodeGroupSSH"
+          "$ref": "#/definitions/NodeGroupSSH",
+          "description": "configures ssh access for this nodegroup",
+          "x-intellij-html-description": "configures ssh access for this nodegroup"
+        },
+        "subnets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Limit nodes to specific subnets",
+          "x-intellij-html-description": "Limit nodes to specific subnets"
         },
         "tags": {
           "additionalProperties": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "object",
           "default": "{}"
         },
         "taints": {
           "additionalProperties": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "object",
           "default": "{}"
         },
         "targetGroupARNs": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "array",
           "description": "Associate target group with auto scaling group",
@@ -881,15 +1208,19 @@
           "type": "integer",
           "description": "gigabytes",
           "x-intellij-html-description": "gigabytes",
-          "default": "80"
+          "default": 80
+        },
+        "volumeThroughput": {
+          "type": "integer"
         },
         "volumeType": {
           "type": "string",
-          "description": "Valid variants are: `\"gp2\"` is General Purpose SSD (default), `\"io1\"` is Provisioned IOPS SSD, `\"sc1\"` is Throughput Optimized HDD, `\"st1\"` is Cold HDD.",
-          "x-intellij-html-description": "Valid variants are: <code>&quot;gp2&quot;</code> is General Purpose SSD (default), <code>&quot;io1&quot;</code> is Provisioned IOPS SSD, <code>&quot;sc1&quot;</code> is Throughput Optimized HDD, <code>&quot;st1&quot;</code> is Cold HDD.",
-          "default": "gp2",
+          "description": "Valid variants are: `\"gp2\"` is General Purpose SSD, `\"gp3\"` is General Purpose SSD which can be optimised for high throughput (default), `\"io1\"` is Provisioned IOPS SSD, `\"sc1\"` is Cold HDD, `\"st1\"` is Throughput Optimized HDD.",
+          "x-intellij-html-description": "Valid variants are: <code>&quot;gp2&quot;</code> is General Purpose SSD, <code>&quot;gp3&quot;</code> is General Purpose SSD which can be optimised for high throughput (default), <code>&quot;io1&quot;</code> is Provisioned IOPS SSD, <code>&quot;sc1&quot;</code> is Cold HDD, <code>&quot;st1&quot;</code> is Throughput Optimized HDD.",
+          "default": "gp3",
           "enum": [
             "gp2",
+            "gp3",
             "io1",
             "sc1",
             "st1"
@@ -901,6 +1232,9 @@
         "amiFamily",
         "instanceType",
         "availabilityZones",
+        "subnets",
+        "instancePrefix",
+        "instanceName",
         "desiredCapacity",
         "minSize",
         "maxSize",
@@ -911,28 +1245,30 @@
         "tags",
         "iam",
         "ami",
-        "instancesDistribution",
-        "instancePrefix",
-        "instanceName",
         "securityGroups",
-        "asgMetricsCollection",
+        "maxPodsPerNode",
+        "asgSuspendProcesses",
         "ebsOptimized",
-        "cpuCredits",
         "volumeType",
         "volumeName",
         "volumeEncrypted",
         "volumeKmsKeyID",
         "volumeIOPS",
-        "maxPodsPerNode",
+        "volumeThroughput",
+        "preBootstrapCommands",
+        "overrideBootstrapCommand",
+        "disableIMDSv1",
+        "disablePodIMDS",
+        "placement",
+        "instancesDistribution",
+        "asgMetricsCollection",
+        "cpuCredits",
         "taints",
         "classicLoadBalancerNames",
         "targetGroupARNs",
         "bottlerocket",
-        "preBootstrapCommands",
-        "overrideBootstrapCommand",
         "clusterDNS",
-        "kubeletExtraConfig",
-        "disableIMDSv1"
+        "kubeletExtraConfig"
       ],
       "additionalProperties": false,
       "description": "holds configuration attributes that are specific to a nodegroup",
@@ -961,26 +1297,21 @@
       "properties": {
         "attachPolicyARNs": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "array"
         },
         "instanceProfileARN": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         },
         "instanceRoleARN": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         },
         "instanceRoleName": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         },
         "instanceRolePermissionsBoundary": {
-          "type": "string",
-          "default": ""
+          "type": "string"
         },
         "withAddonPolicies": {
           "$ref": "#/definitions/NodeGroupIAMAddonPolicies"
@@ -1004,34 +1335,48 @@
           "type": "boolean"
         },
         "appMesh": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "enables full access to AppMesh",
+          "x-intellij-html-description": "enables full access to AppMesh"
         },
         "appMeshPreview": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "enables full access to AppMesh Preview",
+          "x-intellij-html-description": "enables full access to AppMesh Preview"
         },
         "autoScaler": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "enables IAM policy for cluster-autoscaler",
+          "x-intellij-html-description": "enables IAM policy for cluster-autoscaler"
         },
         "certManager": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "enables the ability to add records to Route 53 in order to solve the DNS01 challenge. More information can be found [here](https://cert-manager.io/docs/configuration/acme/dns01/route53/#set-up-a-iam-role)",
+          "x-intellij-html-description": "enables the ability to add records to Route 53 in order to solve the DNS01 challenge. More information can be found <a href=\"https://cert-manager.io/docs/configuration/acme/dns01/route53/#set-up-a-iam-role\">here</a>"
         },
         "cloudWatch": {
           "type": "boolean"
         },
         "ebs": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "enables the new EBS CSI (Elastic Block Store Container Storage Interface) driver",
+          "x-intellij-html-description": "enables the new EBS CSI (Elastic Block Store Container Storage Interface) driver"
         },
         "efs": {
           "type": "boolean"
         },
         "externalDNS": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "adds the external-dns project policies for Amazon Route 53",
+          "x-intellij-html-description": "adds the external-dns project policies for Amazon Route 53"
         },
         "fsx": {
           "type": "boolean"
         },
         "imageBuilder": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "allows for full ECR (Elastic Container Registry) access. This is useful for building, for example, a CI server that needs to push images to ECR",
+          "x-intellij-html-description": "allows for full ECR (Elastic Container Registry) access. This is useful for building, for example, a CI server that needs to push images to ECR"
         },
         "xRay": {
           "type": "boolean"
@@ -1062,25 +1407,32 @@
       "properties": {
         "instanceTypes": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "array"
         },
         "maxPrice": {
-          "type": "number"
+          "type": "number",
+          "default": "on demand price"
         },
         "onDemandBaseCapacity": {
-          "type": "integer"
+          "type": "integer",
+          "default": 0
         },
         "onDemandPercentageAboveBaseCapacity": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Range [0-100]",
+          "x-intellij-html-description": "Range [0-100]",
+          "default": 100
         },
         "spotAllocationStrategy": {
           "type": "string"
         },
         "spotInstancePools": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Range [1-20]",
+          "x-intellij-html-description": "Range [1-20]",
+          "default": 2
         }
       },
       "preferredOrder": [
@@ -1099,8 +1451,7 @@
       "properties": {
         "attachIDs": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "array",
           "description": "attaches additional security groups to the nodegroup",
@@ -1108,15 +1459,15 @@
         },
         "withLocal": {
           "type": "boolean",
-          "description": "attach a security group local to this nodegroup",
-          "x-intellij-html-description": "attach a security group local to this nodegroup",
-          "default": "true"
+          "description": "attach a security group local to this nodegroup Not supported for managed nodegroups",
+          "x-intellij-html-description": "attach a security group local to this nodegroup Not supported for managed nodegroups",
+          "default": true
         },
         "withShared": {
           "type": "boolean",
           "description": "attach the security group shared among all nodegroups in the cluster",
           "x-intellij-html-description": "attach the security group shared among all nodegroups in the cluster",
-          "default": "true"
+          "default": true
         }
       },
       "preferredOrder": [
@@ -1131,7 +1482,14 @@
     "NodeGroupSSH": {
       "properties": {
         "allow": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Enables/Disables the security group configuration. Values provided by SourceSecurityGroupIDs are ignored if set to false",
+          "x-intellij-html-description": "Enables/Disables the security group configuration. Values provided by SourceSecurityGroupIDs are ignored if set to false"
+        },
+        "enableSsm": {
+          "type": "boolean",
+          "description": "Enables the ability to [SSH onto nodes using SSM](/introduction#ssh-access)",
+          "x-intellij-html-description": "Enables the ability to <a href=\"/introduction#ssh-access\">SSH onto nodes using SSM</a>"
         },
         "publicKey": {
           "type": "string"
@@ -1144,8 +1502,7 @@
         },
         "sourceSecurityGroupIds": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "array"
         }
@@ -1155,7 +1512,8 @@
         "publicKeyPath",
         "publicKey",
         "publicKeyName",
-        "sourceSecurityGroupIds"
+        "sourceSecurityGroupIds",
+        "enableSsm"
       ],
       "additionalProperties": false,
       "description": "holds all the ssh access configuration to a NodeGroup",
@@ -1163,6 +1521,22 @@
     },
     "Operator": {
       "properties": {
+        "additionalFluxArgs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Additional command line arguments for the Flux daemon",
+          "x-intellij-html-description": "Additional command line arguments for the Flux daemon"
+        },
+        "additionalHelmOperatorArgs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Additional command line arguments for the Helm Operator",
+          "x-intellij-html-description": "Additional command line arguments for the Helm Operator"
+        },
         "commitOperatorManifests": {
           "type": "boolean",
           "description": "Commit and push Flux manifests to the Git Repo on install",
@@ -1171,14 +1545,12 @@
         "label": {
           "type": "string",
           "description": "Git label to keep track of Flux's sync progress; this is equivalent to overriding --git-sync-tag and --git-notes-ref in Flux",
-          "x-intellij-html-description": "Git label to keep track of Flux's sync progress; this is equivalent to overriding --git-sync-tag and --git-notes-ref in Flux",
-          "default": ""
+          "x-intellij-html-description": "Git label to keep track of Flux's sync progress; this is equivalent to overriding --git-sync-tag and --git-notes-ref in Flux"
         },
         "namespace": {
           "type": "string",
           "description": "Cluster namespace where to install Flux and the Helm Operator e.g. flux",
-          "x-intellij-html-description": "Cluster namespace where to install Flux and the Helm Operator e.g. flux",
-          "default": ""
+          "x-intellij-html-description": "Cluster namespace where to install Flux and the Helm Operator e.g. flux"
         },
         "readOnly": {
           "type": "boolean",
@@ -1197,22 +1569,41 @@
         "label",
         "namespace",
         "withHelm",
-        "readOnly"
+        "readOnly",
+        "additionalFluxArgs",
+        "additionalHelmOperatorArgs"
       ],
       "additionalProperties": false,
       "description": "groups all configuration options related to the operator used to keep the cluster and the Git repository in sync.",
       "x-intellij-html-description": "groups all configuration options related to the operator used to keep the cluster and the Git repository in sync."
+    },
+    "Placement": {
+      "properties": {
+        "groupName": {
+          "type": "string"
+        }
+      },
+      "preferredOrder": [
+        "groupName"
+      ],
+      "additionalProperties": false,
+      "description": "specifies placement group information",
+      "x-intellij-html-description": "specifies placement group information"
     },
     "PrivateCluster": {
       "properties": {
         "additionalEndpointServices": {
           "items": {
             "type": "string",
-            "default": ""
+            "enum": [
+              "cloudformation",
+              "autoscaling",
+              "logs"
+            ]
           },
           "type": "array",
-          "description": "specifies additional endpoint services that must be enabled for private access Valid values are cloudformation, autoscaling and logs",
-          "x-intellij-html-description": "specifies additional endpoint services that must be enabled for private access Valid values are cloudformation, autoscaling and logs"
+          "description": "specifies additional endpoint services that must be enabled for private access. Valid entries are: `\"cloudformation\"`, `\"autoscaling\"`, `\"logs\"`.",
+          "x-intellij-html-description": "specifies additional endpoint services that must be enabled for private access. Valid entries are: <code>&quot;cloudformation&quot;</code>, <code>&quot;autoscaling&quot;</code>, <code>&quot;logs&quot;</code>."
         },
         "enabled": {
           "type": "boolean",
@@ -1240,14 +1631,12 @@
         "revision": {
           "type": "string",
           "description": "of the Quick Start profile. Can be a branch, tag or commit hash",
-          "x-intellij-html-description": "of the Quick Start profile. Can be a branch, tag or commit hash",
-          "default": ""
+          "x-intellij-html-description": "of the Quick Start profile. Can be a branch, tag or commit hash"
         },
         "source": {
           "type": "string",
           "description": "Name or URL of the Quick Start profile",
           "x-intellij-html-description": "Name or URL of the Quick Start profile",
-          "default": "",
           "examples": [
             "app-dev"
           ]
@@ -1267,25 +1656,21 @@
         "branch": {
           "type": "string",
           "description": "The git branch under which cluster configuration files will be committed & pushed, e.g. master",
-          "x-intellij-html-description": "The git branch under which cluster configuration files will be committed &amp; pushed, e.g. master",
-          "default": ""
+          "x-intellij-html-description": "The git branch under which cluster configuration files will be committed &amp; pushed, e.g. master"
         },
         "email": {
           "type": "string",
           "description": "Git email which will be used to commit changes",
-          "x-intellij-html-description": "Git email which will be used to commit changes",
-          "default": ""
+          "x-intellij-html-description": "Git email which will be used to commit changes"
         },
         "fluxPath": {
           "type": "string",
           "description": "The directory under which Flux configuration files will be written, e.g. flux/",
-          "x-intellij-html-description": "The directory under which Flux configuration files will be written, e.g. flux/",
-          "default": ""
+          "x-intellij-html-description": "The directory under which Flux configuration files will be written, e.g. flux/"
         },
         "paths": {
           "items": {
-            "type": "string",
-            "default": ""
+            "type": "string"
           },
           "type": "array",
           "description": "Relative paths within the Git repository which the GitOps operator will monitor to find Kubernetes manifests to apply, e.g. [\"kube-system\", \"base\"]",
@@ -1294,14 +1679,12 @@
         "privateSSHKeyPath": {
           "type": "string",
           "description": "Path to the private SSH key to use to authenticate",
-          "x-intellij-html-description": "Path to the private SSH key to use to authenticate",
-          "default": ""
+          "x-intellij-html-description": "Path to the private SSH key to use to authenticate"
         },
         "url": {
           "type": "string",
           "description": "The Git SSH URL to the repository which will contain the cluster configuration",
           "x-intellij-html-description": "The Git SSH URL to the repository which will contain the cluster configuration",
-          "default": "",
           "examples": [
             "git@github.com:org/repo"
           ]
@@ -1309,8 +1692,7 @@
         "user": {
           "type": "string",
           "description": "Git user which will be used to commit changes",
-          "x-intellij-html-description": "Git user which will be used to commit changes",
-          "default": ""
+          "x-intellij-html-description": "Git user which will be used to commit changes"
         }
       },
       "preferredOrder": [
@@ -1341,6 +1723,50 @@
       "additionalProperties": false,
       "description": "defines the configuration for KMS encryption provider",
       "x-intellij-html-description": "defines the configuration for KMS encryption provider"
+    },
+    "WellKnownPolicies": {
+      "properties": {
+        "autoScaler": {
+          "type": "boolean",
+          "description": "adds policies for cluster-autoscaler. See [autoscaler AWS docs](https://docs.aws.amazon.com/eks/latest/userguide/cluster-autoscaler.html).",
+          "x-intellij-html-description": "adds policies for cluster-autoscaler. See <a href=\"https://docs.aws.amazon.com/eks/latest/userguide/cluster-autoscaler.html\">autoscaler AWS docs</a>.",
+          "default": "false"
+        },
+        "awsLoadBalancerController": {
+          "type": "boolean",
+          "description": "adds policies for using the aws-load-balancer-controller. See [Load Balancer docs](https://docs.aws.amazon.com/eks/latest/userguide/aws-load-balancer-controller.html).",
+          "x-intellij-html-description": "adds policies for using the aws-load-balancer-controller. See <a href=\"https://docs.aws.amazon.com/eks/latest/userguide/aws-load-balancer-controller.html\">Load Balancer docs</a>.",
+          "default": "false"
+        },
+        "certManager": {
+          "type": "boolean",
+          "description": "adds cert-manager policies. See [cert-manager docs](https://cert-manager.io/docs/configuration/acme/dns01/route53).",
+          "x-intellij-html-description": "adds cert-manager policies. See <a href=\"https://cert-manager.io/docs/configuration/acme/dns01/route53\">cert-manager docs</a>.",
+          "default": "false"
+        },
+        "externalDNS": {
+          "type": "boolean",
+          "description": "adds external-dns policies for Amazon Route 53. See [external-dns docs](https://github.com/kubernetes-sigs/external-dns/blob/master/docs/tutorials/aws.md).",
+          "x-intellij-html-description": "adds external-dns policies for Amazon Route 53. See <a href=\"https://github.com/kubernetes-sigs/external-dns/blob/master/docs/tutorials/aws.md\">external-dns docs</a>.",
+          "default": "false"
+        },
+        "imageBuilder": {
+          "type": "boolean",
+          "description": "allows for full ECR (Elastic Container Registry) access.",
+          "x-intellij-html-description": "allows for full ECR (Elastic Container Registry) access.",
+          "default": "false"
+        }
+      },
+      "preferredOrder": [
+        "imageBuilder",
+        "autoScaler",
+        "awsLoadBalancerController",
+        "externalDNS",
+        "certManager"
+      ],
+      "additionalProperties": false,
+      "description": "for attaching common IAM policies",
+      "x-intellij-html-description": "for attaching common IAM policies"
     },
     "github.com|weaveworks|eksctl|pkg|utils|ipnet.IPNet": {
       "type": "string",

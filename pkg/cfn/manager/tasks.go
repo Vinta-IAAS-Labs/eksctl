@@ -2,145 +2,13 @@ package manager
 
 import (
 	"fmt"
-	"strings"
-	"sync"
 
-	"github.com/kris-nova/logger"
 	"k8s.io/client-go/kubernetes"
 
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 	iamoidc "github.com/weaveworks/eksctl/pkg/iam/oidc"
 	kubewrapper "github.com/weaveworks/eksctl/pkg/kubernetes"
 )
-
-// Task is a common interface for the stack manager tasks
-type Task interface {
-	Describe() string
-	Do(chan error) error
-}
-
-// TaskTree wraps a set of tasks
-type TaskTree struct {
-	tasks     []Task
-	Parallel  bool
-	PlanMode  bool
-	IsSubTask bool
-}
-
-// Append new tasks to the set
-func (t *TaskTree) Append(newTasks ...Task) {
-	t.tasks = append(t.tasks, newTasks...)
-}
-
-// Len returns number of tasks in the set
-func (t *TaskTree) Len() int {
-	if t == nil {
-		return 0
-	}
-	return len(t.tasks)
-}
-
-// Describe the set
-func (t *TaskTree) Describe() string {
-	descriptions := []string{}
-	for _, task := range t.tasks {
-		descriptions = append(descriptions, task.Describe())
-	}
-	mode := "sequential"
-	if t.Parallel {
-		mode = "parallel"
-	}
-	count := len(descriptions)
-	var msg string
-	noun := "task"
-	if t.IsSubTask {
-		noun = "sub-task"
-	}
-	switch count {
-	case 0:
-		msg = "no tasks"
-	case 1:
-		msg = fmt.Sprintf("1 %s: { %s }", noun, descriptions[0])
-		if t.IsSubTask {
-			msg = descriptions[0] // simple description for single sub-task
-		}
-	default:
-		noun += "s"
-		msg = fmt.Sprintf("%d %s %s: { %s }", count, mode, noun, strings.Join(descriptions, ", "))
-	}
-	if t.PlanMode {
-		return "(plan) " + msg
-	}
-	return msg
-}
-
-// Do will run through the set in the background, it may return an error immediately,
-// or eventually write to the errs channel; it will close the channel once all tasks
-// are completed
-func (t *TaskTree) Do(allErrs chan error) error {
-	if t.Len() == 0 || t.PlanMode {
-		logger.Debug("no actual tasks")
-		close(allErrs)
-		return nil
-	}
-
-	errs := make(chan error)
-
-	if t.Parallel {
-		go doParallelTasks(errs, t.tasks)
-	} else {
-		go doSequentialTasks(errs, t.tasks)
-	}
-
-	go func() {
-		defer close(allErrs)
-		for err := range errs {
-			allErrs <- err
-		}
-	}()
-
-	return nil
-}
-
-// DoAllSync will run through the set in the foregounds and return all the errors
-// in a slice
-func (t *TaskTree) DoAllSync() []error {
-	if t.Len() == 0 || t.PlanMode {
-		logger.Debug("no actual tasks")
-		return nil
-	}
-
-	errs := make(chan error)
-
-	if t.Parallel {
-		go doParallelTasks(errs, t.tasks)
-	} else {
-		go doSequentialTasks(errs, t.tasks)
-	}
-
-	allErrs := []error{}
-	for err := range errs {
-		allErrs = append(allErrs, err)
-	}
-	return allErrs
-}
-
-type taskWithoutParams struct {
-	info string
-	call func(chan error) error
-}
-
-func (t *taskWithoutParams) Describe() string         { return t.info }
-func (t *taskWithoutParams) Do(errs chan error) error { return t.call(errs) }
-
-type taskWithNameParam struct {
-	info string
-	name string
-	call func(chan error, string) error
-}
-
-func (t *taskWithNameParam) Describe() string         { return t.info }
-func (t *taskWithNameParam) Do(errs chan error) error { return t.call(errs, t.name) }
 
 type createClusterTask struct {
 	info                 string
@@ -158,24 +26,26 @@ type nodeGroupTask struct {
 	info                 string
 	nodeGroup            *api.NodeGroup
 	supportsManagedNodes bool
+	forceAddCNIPolicy    bool
 	stackCollection      *StackCollection
 }
 
 func (t *nodeGroupTask) Describe() string { return t.info }
 func (t *nodeGroupTask) Do(errs chan error) error {
-	return t.stackCollection.createNodeGroupTask(errs, t.nodeGroup, t.supportsManagedNodes)
+	return t.stackCollection.createNodeGroupTask(errs, t.nodeGroup, t.supportsManagedNodes, t.forceAddCNIPolicy)
 }
 
 type managedNodeGroupTask struct {
-	info            string
-	nodeGroup       *api.ManagedNodeGroup
-	stackCollection *StackCollection
+	info              string
+	nodeGroup         *api.ManagedNodeGroup
+	stackCollection   *StackCollection
+	forceAddCNIPolicy bool
 }
 
 func (t *managedNodeGroupTask) Describe() string { return t.info }
 
 func (t *managedNodeGroupTask) Do(errorCh chan error) error {
-	return t.stackCollection.createManagedNodeGroupTask(errorCh, t.nodeGroup)
+	return t.stackCollection.createManagedNodeGroupTask(errorCh, t.nodeGroup, t.forceAddCNIPolicy)
 }
 
 type clusterCompatTask struct {
@@ -191,15 +61,15 @@ func (t *clusterCompatTask) Do(errorCh chan error) error {
 }
 
 type taskWithClusterIAMServiceAccountSpec struct {
-	info           string
-	serviceAccount *api.ClusterIAMServiceAccount
-	oidc           *iamoidc.OpenIDConnectManager
-	call           func(chan error, *api.ClusterIAMServiceAccount, *iamoidc.OpenIDConnectManager) error
+	info            string
+	stackCollection *StackCollection
+	serviceAccount  *api.ClusterIAMServiceAccount
+	oidc            *iamoidc.OpenIDConnectManager
 }
 
 func (t *taskWithClusterIAMServiceAccountSpec) Describe() string { return t.info }
 func (t *taskWithClusterIAMServiceAccountSpec) Do(errs chan error) error {
-	return t.call(errs, t.serviceAccount, t.oidc)
+	return t.stackCollection.createIAMServiceAccountTask(errs, t.serviceAccount, t.oidc)
 }
 
 type taskWithStackSpec struct {
@@ -256,46 +126,4 @@ func (t *kubernetesTask) Do(errs chan error) error {
 	err = t.call(clientSet)
 	close(errs)
 	return err
-}
-
-func doSingleTask(allErrs chan error, task Task) bool {
-	desc := task.Describe()
-	logger.Debug("started task: %s", desc)
-	errs := make(chan error)
-	if err := task.Do(errs); err != nil {
-		allErrs <- err
-		return false
-	}
-	if err := <-errs; err != nil {
-		allErrs <- err
-		return false
-	}
-	logger.Debug("completed task: %s", desc)
-	return true
-}
-
-func doParallelTasks(allErrs chan error, tasks []Task) {
-	wg := &sync.WaitGroup{}
-	wg.Add(len(tasks))
-	for t := range tasks {
-		go func(t int) {
-			defer wg.Done()
-			if ok := doSingleTask(allErrs, tasks[t]); !ok {
-				logger.Debug("failed task: %s (will continue until other parallel tasks are completed)", tasks[t].Describe())
-			}
-		}(t)
-	}
-	logger.Debug("waiting for %d parallel tasks to complete", len(tasks))
-	wg.Wait()
-	close(allErrs)
-}
-
-func doSequentialTasks(allErrs chan error, tasks []Task) {
-	for t := range tasks {
-		if ok := doSingleTask(allErrs, tasks[t]); !ok {
-			logger.Debug("failed task: %s (will not run other sequential tasks)", tasks[t].Describe())
-			break
-		}
-	}
-	close(allErrs)
 }

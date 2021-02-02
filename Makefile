@@ -6,9 +6,9 @@ version_pkg := github.com/weaveworks/eksctl/pkg/version
 gopath := $(shell go env GOPATH)
 gocache := $(shell go env GOCACHE)
 
-GOBIN ?= $(gopath)/bin
+export GOBIN ?= $(gopath)/bin
 
-AWS_SDK_GO_DIR ?= $(gopath)/pkg/mod/$(shell grep 'aws-sdk-go' go.sum | awk '{print $$1 "@" $$2}' | grep -v 'go.mod' | sort | tail -1)
+AWS_SDK_GO_DIR ?= $(shell go list -m -f '{{.Dir}}' 'github.com/aws/aws-sdk-go')
 
 generated_code_deep_copy_helper := pkg/apis/eksctl.io/v1alpha5/zz_generated.deepcopy.go
 
@@ -33,7 +33,7 @@ install-all-deps: install-build-deps install-site-deps ## Install all dependenci
 
 .PHONY: install-build-deps
 install-build-deps: ## Install dependencies (packages and tools)
-	./install-build-deps.sh
+	build/scripts/build-image-manifest.sh
 
 ##@ Build
 
@@ -42,7 +42,7 @@ godeps = $(shell $(call godeps_cmd,$(1)))
 
 .PHONY: build
 build: generate-always ## Build main binary
-	CGO_ENABLED=0 time go build -ldflags "-X $(version_pkg).gitCommit=$(git_commit) -X $(version_pkg).buildDate=$(build_date)" ./cmd/eksctl
+	CGO_ENABLED=0 go build -ldflags "-X $(version_pkg).gitCommit=$(git_commit) -X $(version_pkg).buildDate=$(build_date)" ./cmd/eksctl
 
 # Build binaries for Linux, Windows and Mac and place them in dist/
 .PHONY: build-all
@@ -50,7 +50,7 @@ build-all: generate-always
 	goreleaser --config=.goreleaser-local.yaml --snapshot --skip-publish --rm-dist
 
 clean: ## Remove artefacts or generated files from previous build
-	rm -rf .license-header eksctl eksctl-integration-test
+	rm -rf eksctl eksctl-integration-test
 
 ##@ Testing & CI
 
@@ -73,15 +73,10 @@ INTEGRATION_TEST_ARGS += -eksctl.version=$(INTEGRATION_TEST_VERSION)
 $(info will launch integration tests for Kubernetes version $(INTEGRATION_TEST_VERSION))
 endif
 
-ifneq ($(SSH_KEY_PATH),)
-INTEGRATION_TEST_ARGS += -eksctl.git.sshkeypath=$(SSH_KEY_PATH)
-$(info will launch integration tests with ssh key path $(SSH_KEY_PATH))
-endif
-
 .PHONY: lint
 lint: ## Run linter over the codebase
-	time "$(GOBIN)/golangci-lint" run
-	@for config_file in $(shell ls .goreleaser*); do time "$(GOBIN)/goreleaser" check -f $${config_file}; done
+	golangci-lint run
+	@for config_file in $(shell ls .goreleaser*); do goreleaser check -f $${config_file} || exit 1; done
 
 .PHONY: test
 test:
@@ -90,13 +85,19 @@ test:
 	$(MAKE) unit-test
 	$(MAKE) build-integration-test
 
+.PHONY: circleci-test
+circleci-test:
+	$(MAKE) check-all-generated-files-up-to-date
+	$(MAKE) unit-test
+	$(MAKE) build-integration-test
+
 .PHONY: unit-test
 unit-test: ## Run unit test only
-	CGO_ENABLED=0 time go test  -tags=release ./pkg/... ./cmd/... $(UNIT_TEST_ARGS)
+	CGO_ENABLED=0 go test  -tags=release ./pkg/... ./cmd/... $(UNIT_TEST_ARGS)
 
 .PHONY: unit-test-race
 unit-test-race: ## Run unit test with race detection
-	CGO_ENABLED=1 time go test -race ./pkg/... ./cmd/... $(UNIT_TEST_ARGS)
+	CGO_ENABLED=1 go test -race ./pkg/... ./cmd/... $(UNIT_TEST_ARGS)
 
 .PHONY: build-integration-test
 build-integration-test: $(all_generated_code)
@@ -111,21 +112,23 @@ integration-test: build build-integration-test ## Run the integration tests (wit
 	JUNIT_REPORT_DIR=$(git_toplevel)/test-results ./eksctl-integration-test $(INTEGRATION_TEST_ARGS)
 
 .PHONY: integration-test-container
-integration-test-container: eksctl-image ## Run the integration tests inside a Docker container
-	$(MAKE) integration-test-container-pre-built
-
-.PHONY: integration-test-container-pre-built
-integration-test-container-pre-built: ## Run the integration tests inside a Docker container
+integration-test-container:
+	sudo cp -f ${SSH_KEY_PATH} $(HOME)/project/.ssh/gitops_id_rsa
+	sudo chmod 0600 $(HOME)/project/.ssh/gitops_id_rsa
 	docker run \
-	  --env=AWS_PROFILE \
-	  --volume=$(HOME)/.aws:/root/.aws \
-	  --volume=$(HOME)/.ssh:/root/.ssh \
-	  --workdir=/usr/local/share/eksctl \
-	    $(eksctl_image_name) \
-		  eksctl-integration-test \
-		    -eksctl.path=/usr/local/bin/eksctl \
-			-eksctl.kubeconfig=/tmp/kubeconfig \
-			  $(INTEGRATION_TEST_ARGS)
+	  --env=JUNIT_REPORT_DIR=/src/test-results \
+	  --env=GOPRIVATE \
+	  --env=AWS_SESSION_TOKEN \
+	  --env=AWS_ACCESS_KEY_ID \
+	  --env=AWS_SECRET_ACCESS_KEY \
+	  --env=SSH_KEY_PATH=/root/.ssh/gitops_id_rsa \
+	  --env=TEST_V=1 \
+	  --volume=$(shell pwd):/src \
+	  --volume=$(HOME)/.cache/go-build/:/root/.cache/go-build \
+	  --volume=$(HOME)/go/pkg/mod/:/go/pkg/mod \
+	  --volume=$(HOME)/project/.ssh:/root/.ssh \
+	  weaveworks/eksctl-build:$(shell cat build/docker/image_tag) \
+          $(MAKE) integration-test
 
 TEST_CLUSTER ?= integration-test-dev
 .PHONY: integration-test-dev
@@ -142,10 +145,10 @@ integration-test-dev: build-integration-test ## Run the integration tests withou
 		-eksctl.kubeconfig=$(HOME)/.kube/eksctl/clusters/$(TEST_CLUSTER)
 
 create-integration-test-dev-cluster: build ## Create a test cluster for use when developing integration tests
-	./eksctl create cluster --name=integration-test-dev --auto-kubeconfig --nodes=1 --nodegroup-name=ng-0
+	./eksctl create cluster --name=$(TEST_CLUSTER) --auto-kubeconfig --nodes=1 --nodegroup-name=ng-0
 
 delete-integration-test-dev-cluster: build ## Delete the test cluster for use when developing integration tests
-	./eksctl delete cluster --name=integration-test-dev --auto-kubeconfig
+	./eksctl delete cluster --name=$(TEST_CLUSTER) --auto-kubeconfig
 
 ##@ Code Generation
 
@@ -156,11 +159,16 @@ generate-always: pkg/addons/default/assets/aws-node.yaml ## Generate code (requi
 	@# go-bindata targets must run every time, as dependencies are too complex to declare in make:
 	@# - deleting an asset is breaks the dependencies
 	@# - different version of go-bindata generate different code
-	@$(GOBIN)/go-bindata -v
-	env GOBIN=$(GOBIN) time go generate ./pkg/apis/eksctl.io/v1alpha5/generate.go
-	env GOBIN=$(GOBIN) time go generate ./pkg/nodebootstrap
-	env GOBIN=$(GOBIN) time go generate ./pkg/addons/default/generate.go
-	env GOBIN=$(GOBIN) time go generate ./pkg/addons
+	@go-bindata -v
+	go generate ./pkg/apis/eksctl.io/v1alpha5/generate.go
+	go generate ./pkg/nodebootstrap
+	go generate ./pkg/addons/default/generate.go
+	go generate ./pkg/addons
+	go generate ./pkg/authconfigmap
+	# mocks
+	go generate ./pkg/eks
+	go generate ./pkg/drain
+	go generate ./pkg/actions/...
 
 .PHONY: generate-all
 generate-all: generate-always $(conditionally_generated_files) ## Re-generate all the automatically-generated source files
@@ -169,15 +177,6 @@ generate-all: generate-always $(conditionally_generated_files) ## Re-generate al
 check-all-generated-files-up-to-date: generate-all
 	git diff --quiet -- $(all_generated_files) || (git --no-pager diff $(all_generated_files); echo "HINT: to fix this, run 'git commit $(all_generated_files) --message \"Update generated files\"'"; exit 1)
 
-.license-header: LICENSE
-	@# generate-groups.sh can't find the license header when using Go modules, so we provide one
-	printf "/*\n%s\n*/\n" "$$(cat LICENSE)" > $@
-
-### Update AMIs in ami static resolver
-.PHONY: update-ami
-update-ami: ## Generate the list of AMIs for use with static resolver. Queries AWS.
-	go generate ./pkg/ami
-
 ### Update maxpods.go from AWS
 .PHONY: update-maxpods
 update-maxpods: ## Re-download the max pods info from AWS and regenerate the maxpods.go file
@@ -185,18 +184,19 @@ update-maxpods: ## Re-download the max pods info from AWS and regenerate the max
 
 ### Update aws-node addon manifests from AWS
 pkg/addons/default/assets/aws-node.yaml:
-	$(MAKE) update-aws-node
+	go generate ./pkg/addons/default/aws_node_generate.go
 
 .PHONY: update-aws-node
 update-aws-node: ## Re-download the aws-node manifests from AWS
-	time go generate ./pkg/addons/default/aws_node_generate.go
+	go generate ./pkg/addons/default/aws_node_generate.go
+	go generate ./pkg/addons/default/generate.go
 
 deep_copy_helper_input = $(shell $(call godeps_cmd,./pkg/apis/...) | sed 's|$(generated_code_deep_copy_helper)||' )
-$(generated_code_deep_copy_helper): $(deep_copy_helper_input) .license-header ## Generate Kubernetes API helpers
-	./tools/update-codegen.sh
+$(generated_code_deep_copy_helper): $(deep_copy_helper_input) ## Generate Kubernetes API helpers
+	build/scripts/update-codegen.sh
 
 $(generated_code_aws_sdk_mocks): $(call godeps,pkg/eks/mocks/mocks.go)
-	time env GOBIN=$(GOBIN) AWS_SDK_GO_DIR=$(AWS_SDK_GO_DIR) go generate ./pkg/eks/mocks
+	AWS_SDK_GO_DIR=$(AWS_SDK_GO_DIR) go generate ./pkg/eks/mocks
 
 .PHONY: generate-kube-reserved
 generate-kube-reserved: ## Update instance list with respective specs
@@ -205,11 +205,11 @@ generate-kube-reserved: ## Update instance list with respective specs
 ##@ Release
 .PHONY: prepare-release
 prepare-release:
-	./tag-release.sh
+	build/scripts/tag-release.sh
 
 .PHONY: prepare-release-candidate
 prepare-release-candidate:
-	./tag-release-candidate.sh
+	build/scripts/tag-release-candidate.sh
 
 .PHONY: print-version
 print-version:

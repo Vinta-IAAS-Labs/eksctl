@@ -45,15 +45,14 @@ func ToKubeNodeGroups(clusterConfig *api.ClusterConfig) []eks.KubeNodeGroup {
 	return kubeNodeGroups
 }
 
-// ToBaseNodeGroups combines managed and self-managed nodegroups and returns a slice of *api.NodeGroupBase containing
-// both types of nodegroups
-func ToBaseNodeGroups(clusterConfig *api.ClusterConfig) []*api.NodeGroupBase {
-	var baseNodeGroups []*api.NodeGroupBase
+// ToNodePools combines managed and self-managed nodegroups and returns a slice of api.NodePool
+func ToNodePools(clusterConfig *api.ClusterConfig) []api.NodePool {
+	var nodePools []api.NodePool
 	for _, ng := range clusterConfig.NodeGroups {
-		baseNodeGroups = append(baseNodeGroups, ng.NodeGroupBase)
+		nodePools = append(nodePools, ng)
 	}
 	for _, ng := range clusterConfig.ManagedNodeGroups {
-		baseNodeGroups = append(baseNodeGroups, ng.NodeGroupBase)
+		nodePools = append(nodePools, ng)
 	}
-	return baseNodeGroups
+	return nodePools
 }

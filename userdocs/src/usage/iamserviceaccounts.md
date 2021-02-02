@@ -5,7 +5,7 @@
 Amazon EKS supports [IAM Roles for Service Accounts (IRSA)][eks-user-guide] that allows cluster operators to map AWS IAM Roles to Kubernetes Service Accounts.
 
 This provides fine-grained permission management for apps that run on EKS and use other AWS services. These could be apps that use S3,
-any other data services (RDS, MQ, STS, DynamoDB), or Kubernetes components like AWS ALB Ingress controller or ExternalDNS.
+any other data services (RDS, MQ, STS, DynamoDB), or Kubernetes components like AWS Load Balancer controller or ExternalDNS.
 
 You can easily create IAM Role and Service Account pairs with `eksctl`.
 
@@ -61,6 +61,12 @@ Custom tagging may also be applied to the IAM Role by specifying `--tags`:
 
 ```console
 eksctl create iamserviceaccount --cluster=<clusterName> --name=<serviceAccountName> --tags "Owner=John Doe,Team=Some Team"
+```
+
+CloudFormation will generate a role name that includes a random string. If you prefer a predetermined role name you can specify `--role-name`:
+
+```console
+eksctl create iamserviceaccount --cluster=<clusterName> --name=<serviceAccountName> --role-name "custom-role-name"
 ```
 
 Currently, to update a role you will need to re-create, run `eksctl delete iamserviceaccount` followed by `eksctl create iamserviceaccount` to achieve that.
@@ -122,7 +128,9 @@ iam:
         - "autoscaling:DescribeTags"
         - "autoscaling:SetDesiredCapacity"
         - "autoscaling:TerminateInstanceInAutoScalingGroup"
+        - "ec2:DescribeLaunchTemplateVersions"
         Resource: '*'
+    roleName: eksctl-cluster-autoscaler-role
 
 nodeGroups:
   - name: "ng-1"

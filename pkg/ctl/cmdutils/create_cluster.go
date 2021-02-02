@@ -14,9 +14,17 @@ type CreateClusterCmdParams struct {
 	AvailabilityZones           []string
 	InstallWindowsVPCController bool
 	InstallNeuronDevicePlugin   bool
+	InstallNvidiaDevicePlugin   bool
 	KopsClusterNameForVPC       string
 	Subnets                     map[api.SubnetTopology]*[]string
 	WithoutNodeGroup            bool
-	Managed                     bool
 	Fargate                     bool
+	CreateManagedNGOptions
+}
+
+// CreateManagedNGOptions holds options for creating a managed nodegroup
+type CreateManagedNGOptions struct {
+	Managed       bool
+	Spot          bool
+	InstanceTypes []string
 }

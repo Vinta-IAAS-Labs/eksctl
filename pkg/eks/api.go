@@ -71,8 +71,13 @@ type ProviderServices struct {
 // CloudFormation returns a representation of the CloudFormation API
 func (p ProviderServices) CloudFormation() cloudformationiface.CloudFormationAPI { return p.cfn }
 
-// CloudFormationRoleARN returns, if any,  a service role used by CloudFormation to call AWS API on your behalf
+// CloudFormationRoleARN returns, if any, a service role used by CloudFormation to call AWS API on your behalf
 func (p ProviderServices) CloudFormationRoleARN() string { return p.spec.CloudFormationRoleARN }
+
+// CloudFormationDisableRollback returns whether stacks should not rollback on failure
+func (p ProviderServices) CloudFormationDisableRollback() bool {
+	return p.spec.CloudFormationDisableRollback
+}
 
 // EKS returns a representation of the EKS API
 func (p ProviderServices) EKS() eksiface.EKSAPI { return p.eks }
@@ -111,7 +116,7 @@ func (p ProviderServices) WaitTimeout() time.Duration { return p.spec.WaitTimeou
 type ProviderStatus struct {
 	iamRoleARN   string
 	sessionCreds *credentials.Credentials
-	clusterInfo  *clusterInfo
+	ClusterInfo  *ClusterInfo
 }
 
 // New creates a new setup of the used AWS APIs
@@ -266,20 +271,14 @@ func (c *ClusterProvider) CheckAuth() error {
 	return nil
 }
 
-// EnsureAMI ensures that the node AMI is set and is available
-func EnsureAMI(provider api.ClusterProvider, version string, ng *api.NodeGroup) error {
-	if api.IsAMI(ng.AMI) {
-		return ami.Use(provider.EC2(), ng)
-	}
-
+// ResolveAMI ensures that the node AMI is set and is available
+func ResolveAMI(provider api.ClusterProvider, version string, ng *api.NodeGroup) error {
 	var resolver ami.Resolver
 	switch ng.AMI {
 	case api.NodeImageResolverAuto:
 		resolver = ami.NewAutoResolver(provider.EC2())
 	case api.NodeImageResolverAutoSSM:
 		resolver = ami.NewSSMResolver(provider.SSM())
-	case api.NodeImageResolverStatic:
-		resolver = ami.NewStaticResolver()
 	default:
 		resolver = ami.NewMultiResolver(
 			ami.NewSSMResolver(provider.SSM()),
@@ -296,9 +295,7 @@ func EnsureAMI(provider api.ClusterProvider, version string, ng *api.NodeGroup) 
 		return ami.NewErrFailedResolution(provider.Region(), version, instanceType, ng.AMIFamily)
 	}
 	ng.AMI = id
-
-	// Check the AMI is available and populate RootDevice information
-	return ami.Use(provider.EC2(), ng)
+	return nil
 }
 
 // selectInstanceType determines which instanceType is relevant for selecting an AMI

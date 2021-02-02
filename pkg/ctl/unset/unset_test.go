@@ -2,6 +2,7 @@ package unset
 
 import (
 	"bytes"
+	"errors"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -11,26 +12,42 @@ import (
 
 var _ = Describe("unset", func() {
 	Describe("invalid-resource", func() {
-		It("with no flag", func() {
+		It("fails", func() {
 			cmd := newMockCmd("invalid-resource")
-			out, err := cmd.execute()
+			_, err := cmd.execute()
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(Equal("unknown command \"invalid-resource\" for \"unset\""))
-			Expect(out).To(ContainSubstring("usage"))
+			Expect(err.Error()).To(ContainSubstring("Error: unknown command \"invalid-resource\" for \"unset\""))
+			Expect(err.Error()).To(ContainSubstring("usage"))
 		})
-		It("with invalid-resource and some flag", func() {
-			cmd := newMockCmd("invalid-resource", "--invalid-flag", "foo")
-			out, err := cmd.execute()
+	})
+
+	Describe("labels", func() {
+		It("fails when no flags set", func() {
+			cmd := newMockCmd("labels")
+			_, err := cmd.execute()
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(Equal("unknown command \"invalid-resource\" for \"unset\""))
-			Expect(out).To(ContainSubstring("usage"))
+			Expect(err.Error()).To(ContainSubstring("Error: required flag(s) \"labels\" not set"))
 		})
-		It("with invalid-resource and additional argument", func() {
-			cmd := newMockCmd("invalid-resource", "foo")
-			out, err := cmd.execute()
+
+		It("fails when cluster flag not set", func() {
+			cmd := newMockCmd("labels", "-l", "k")
+			_, err := cmd.execute()
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(Equal("unknown command \"invalid-resource\" for \"unset\""))
-			Expect(out).To(ContainSubstring("usage"))
+			Expect(err.Error()).To(ContainSubstring("Error: --cluster must be set"))
+		})
+
+		It("fails when --nodegroup flag not set", func() {
+			cmd := newMockCmd("labels", "--cluster", "dummy", "-l", "k")
+			_, err := cmd.execute()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("Error: --nodegroup must be set"))
+		})
+
+		It("fails when name argument is used", func() {
+			cmd := newMockCmd("labels", "--cluster", "dummy", "--nodegroup", "dummyNodeGroup", "dummyName", "-l", "k")
+			_, err := cmd.execute()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("Error: name argument is not supported"))
 		})
 	})
 })
@@ -49,8 +66,13 @@ type mockVerbCmd struct {
 }
 
 func (c mockVerbCmd) execute() (string, error) {
-	buf := new(bytes.Buffer)
-	c.parentCmd.SetOut(buf)
+	outBuf := new(bytes.Buffer)
+	errBuf := new(bytes.Buffer)
+	c.parentCmd.SetOut(outBuf)
+	c.parentCmd.SetErr(errBuf)
 	err := c.parentCmd.Execute()
-	return buf.String(), err
+	if err != nil {
+		err = errors.New(errBuf.String())
+	}
+	return outBuf.String(), err
 }

@@ -5,7 +5,9 @@ import "github.com/weaveworks/eksctl/pkg/schema/test/subpkg"
 // Config describes some settings for _some_ things
 type Config struct {
 	// Num describes the number of subthings
-	Num           int                `json:"num"`
+	Num int `json:"num"`
+	// An option
+	// +required
 	Option        DirectType         `json:"option"`
 	PointerOption *PointerType       `json:"pointeroption"`
 	PackageOption subpkg.PackageType `json:"packageoption"`
@@ -21,6 +23,25 @@ type Config struct {
 	// Tells us which kind of config.
 	// Valid variants are `Kind` constants
 	Kind string `json:"kind"`
+	// Valid entries are `Kind` constants
+	Kinds   []string `json:"kinds"`
+	SumType SumType  `json:"sumType"`
+}
+
+type SumTypeA struct {
+	A string `json:"a"`
+}
+
+type SumTypeB struct {
+	B string `json:"b"`
+}
+
+// Schema type is one of `SumTypeA`, `SumTypeB`
+type SumType struct {
+	// Valid variants are:
+	// `"a"`: type A
+	// `"b"`: type B
+	Type string `json:"type"`
 }
 
 // Values for `Kind`

@@ -16,11 +16,13 @@ nav:
     - Usage:
         - usage/creating-and-managing-clusters.md
         - usage/managing-nodegroups.md
+        - usage/security.md
         - usage/cluster-upgrade.md
         - usage/autoscaling.md
         - usage/custom-ami-support.md
         - usage/vpc-networking.md
         - usage/gpu-support.md
+        - usage/arm-support.md
         - usage/spot-instances.md
         - IAM:
             - usage/iam-permissions-boundary.md
@@ -31,7 +33,10 @@ nav:
         - usage/cloudwatch-cluster-logging.md
         - usage/windows-worker-nodes.md
         - usage/eks-managed-nodes.md
+        - usage/launch-template-support.md
+        - usage/eks-private-cluster.md
         - usage/fargate-support.md
+        - usage/addons.md
         - usage/gitops.md
         - usage/schema.md
         - usage/troubleshooting.md

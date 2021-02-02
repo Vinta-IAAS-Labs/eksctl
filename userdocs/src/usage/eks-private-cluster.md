@@ -52,7 +52,7 @@ privateCluster:
   # For Cluster Autoscaler
   - "autoscaling"
   # CloudWatch logging
-  - "log"
+  - "logs"
 ```
 
 The endpoints supported in `additionalEndpointServices` are `autoscaling`, `cloudformation` and `logs`.
@@ -63,14 +63,15 @@ any public subnets. The `privateNetworking` field (`nodeGroup[*].privateNetworki
 explicitly set. It is an error to leave `privateNetworking` unset in a fully-private cluster.
 
 
- ```yaml
+```yaml
 nodeGroups:
 - name: ng1
   instanceType: m5.large
   desiredCapacity: 2
   # privateNetworking must be explicitly set for a fully-private cluster
-  # Rather than defaulting this field to `true` for a fully-private cluster, we require users to explicitly set it
-  # to make the behaviour explicit and avoid confusion.
+  # Rather than defaulting this field to `true`,
+  # we require users to explicitly set it to make the behaviour
+  # explicit and avoid confusion.
   privateNetworking: true
 
 managedNodeGroups:
@@ -78,7 +79,6 @@ managedNodeGroups:
   instanceType: m5.large
   desiredCapacity: 2
   privateNetworking: true
-
 ```
 
 ## Cluster Endpoint Access
@@ -132,8 +132,6 @@ managedNodeGroups:
   instanceType: m5.large
   desiredCapacity: 2
   privateNetworking: true
-
-
 ```
 
 ## Managing a fully-private cluster
@@ -150,6 +148,22 @@ This is required because eksctl needs access to the Kubernetes API server to all
 to support GitOps and Fargate. After these operations have completed, eksctl switches the cluster endpoint access to private-only.
 This additional update does mean that creation of a fully-private cluster will take longer than for a standard cluster.
 In the future, eksctl may switch to a VPC-enabled Lambda function to perform these API operations.
+
+
+## Outbound access via HTTP proxy servers
+eksctl is able to talk to the AWS APIs via a configured HTTP(S) proxy server,
+however you will need to ensure you set your proxy exclusion list correctly.
+
+Generally, you will need to ensure that requests for the VPC endpoint for your
+cluster are not routed via your proxies by setting an appropriate `no_proxy`
+environment variable including the value `.eks.amazonaws.com`.
+
+If your proxy server performs "SSL interception" and you are using IAM Roles
+for Service Accounts (IRSA), you will need to ensure that you explicitly bypass
+SSL Man-in-the-Middle for the domain `oidc.<region>.amazonaws.com`. Failure to
+do so will result in eksctl obtaining the incorrect root certificate thumbprint
+for the OIDC provider, and the AWS VPC CNI plugin will fail to start due to
+being unable to obtain IAM credentials, rendering your cluster inoperative.
 
 
 ## Further information

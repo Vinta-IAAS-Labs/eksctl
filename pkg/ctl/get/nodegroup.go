@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/weaveworks/eksctl/pkg/actions/nodegroup"
+
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -66,14 +68,26 @@ func doGetNodeGroup(cmd *cmdutils.Cmd, ng *api.NodeGroup, params *getCmdParams) 
 		return err
 	}
 
+	if params.output == "table" {
+		cmdutils.LogRegionAndVersionInfo(cmd.ClusterConfig.Metadata)
+	}
+
 	if err := ctl.CheckAuth(); err != nil {
 		return err
 	}
 
-	manager := ctl.NewStackManager(cfg)
-	summaries, err := manager.GetNodeGroupSummaries(ng.Name)
-	if err != nil {
-		return errors.Wrap(err, "getting nodegroup stack summaries")
+	var summaries []*manager.NodeGroupSummary
+	if ng.Name == "" {
+		summaries, err = nodegroup.New(cfg, ctl, nil).GetAll()
+		if err != nil {
+			return err
+		}
+	} else {
+		summary, err := nodegroup.New(cfg, ctl, nil).Get(ng.Name)
+		if err != nil {
+			return err
+		}
+		summaries = append(summaries, summary)
 	}
 
 	printer, err := printers.NewPrinter(params.output)
@@ -82,6 +96,15 @@ func doGetNodeGroup(cmd *cmdutils.Cmd, ng *api.NodeGroup, params *getCmdParams) 
 	}
 
 	if params.output == "table" {
+		// Empty summary implies no nodegroups
+		// We only error if the output is table, since if the output
+		// is yaml or json we should return an empty object.
+		if len(summaries) == 0 {
+			if ng.Name == "" {
+				return errors.Errorf("No nodegroups found")
+			}
+			return errors.Errorf("nodegroup with name %v not found", ng.Name)
+		}
 		addSummaryTableColumns(printer.(*printers.TablePrinter))
 	}
 
@@ -98,6 +121,9 @@ func addSummaryTableColumns(printer *printers.TablePrinter) {
 	})
 	printer.AddColumn("NODEGROUP", func(s *manager.NodeGroupSummary) string {
 		return s.Name
+	})
+	printer.AddColumn("STATUS", func(s *manager.NodeGroupSummary) string {
+		return s.Status
 	})
 	printer.AddColumn("CREATED", func(s *manager.NodeGroupSummary) string {
 		return s.CreationTime.Format(time.RFC3339)
@@ -116,5 +142,8 @@ func addSummaryTableColumns(printer *printers.TablePrinter) {
 	})
 	printer.AddColumn("IMAGE ID", func(s *manager.NodeGroupSummary) string {
 		return s.ImageID
+	})
+	printer.AddColumn("ASG NAME", func(s *manager.NodeGroupSummary) string {
+		return s.AutoScalingGroupName
 	})
 }

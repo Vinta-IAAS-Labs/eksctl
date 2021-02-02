@@ -1,6 +1,9 @@
 package v1alpha5
 
 import (
+	"fmt"
+
+	"github.com/aws/aws-sdk-go/aws"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
@@ -8,11 +11,6 @@ import (
 )
 
 var _ = Describe("ClusterConfig validation", func() {
-	newNodeGroup := func() *NodeGroup {
-		return &NodeGroup{
-			NodeGroupBase: &NodeGroupBase{},
-		}
-	}
 	Describe("nodeGroups[*].name", func() {
 		var (
 			cfg *ClusterConfig
@@ -53,6 +51,117 @@ var _ = Describe("ClusterConfig validation", func() {
 		})
 	})
 
+	Describe("nodeGroups[*].volumeX", func() {
+		var (
+			cfg *ClusterConfig
+			ng0 *NodeGroup
+		)
+
+		BeforeEach(func() {
+			cfg = NewClusterConfig()
+			ng0 = cfg.NewNodeGroup()
+			ng0.Name = "ng0"
+		})
+
+		When("volumeIOPS is set", func() {
+			BeforeEach(func() {
+				ng0.VolumeIOPS = aws.Int(3000)
+			})
+
+			When("VolumeType is gp3", func() {
+				BeforeEach(func() {
+					*ng0.VolumeType = NodeVolumeTypeGP3
+				})
+
+				It("does not fail", func() {
+					Expect(ValidateNodeGroup(0, ng0)).To(Succeed())
+				})
+
+				When(fmt.Sprintf("the value of volumeIOPS is < %d", minGP3Iops), func() {
+					It("returns an error", func() {
+						ng0.VolumeIOPS = aws.Int(minGP3Iops - 1)
+						Expect(ValidateNodeGroup(0, ng0)).To(MatchError("value for nodeGroups[0].volumeIOPS must be within range 3000-16000"))
+					})
+				})
+
+				When(fmt.Sprintf("the value of volumeIOPS is > %d", maxGP3Iops), func() {
+					It("returns an error", func() {
+						ng0.VolumeIOPS = aws.Int(maxGP3Iops + 1)
+						Expect(ValidateNodeGroup(0, ng0)).To(MatchError("value for nodeGroups[0].volumeIOPS must be within range 3000-16000"))
+					})
+				})
+			})
+
+			When("VolumeType is io1", func() {
+				BeforeEach(func() {
+					*ng0.VolumeType = NodeVolumeTypeIO1
+				})
+
+				It("does not fail", func() {
+					Expect(ValidateNodeGroup(0, ng0)).To(Succeed())
+				})
+
+				When(fmt.Sprintf("the value of volumeIOPS is < %d", minIO1Iops), func() {
+					It("returns an error", func() {
+						ng0.VolumeIOPS = aws.Int(minIO1Iops - 1)
+						Expect(ValidateNodeGroup(0, ng0)).To(MatchError("value for nodeGroups[0].volumeIOPS must be within range 100-64000"))
+					})
+				})
+
+				When(fmt.Sprintf("the value of volumeIOPS is > %d", maxIO1Iops), func() {
+					It("returns an error", func() {
+						ng0.VolumeIOPS = aws.Int(maxIO1Iops + 1)
+						Expect(ValidateNodeGroup(0, ng0)).To(MatchError("value for nodeGroups[0].volumeIOPS must be within range 100-64000"))
+					})
+				})
+			})
+
+			When("VolumeType is one for which IOPS is not supported", func() {
+				It("returns an error", func() {
+					*ng0.VolumeType = NodeVolumeTypeGP2
+					Expect(ValidateNodeGroup(0, ng0)).To(MatchError("nodeGroups[0].volumeIOPS is only supported for io1 and gp3 volume types"))
+				})
+			})
+		})
+
+		When("volumeThroughput is set", func() {
+			BeforeEach(func() {
+				ng0.VolumeThroughput = aws.Int(125)
+			})
+
+			When("VolumeType is gp3", func() {
+				BeforeEach(func() {
+					*ng0.VolumeType = NodeVolumeTypeGP3
+				})
+
+				It("does not fail", func() {
+					Expect(ValidateNodeGroup(0, ng0)).To(Succeed())
+				})
+
+				When(fmt.Sprintf("the value of volumeThroughput is < %d", minThroughput), func() {
+					It("returns an error", func() {
+						ng0.VolumeThroughput = aws.Int(minThroughput - 1)
+						Expect(ValidateNodeGroup(0, ng0)).To(MatchError("value for nodeGroups[0].volumeThroughput must be within range 125-1000"))
+					})
+				})
+
+				When(fmt.Sprintf("the value of volumeIOPS is > %d", maxThroughput), func() {
+					It("returns an error", func() {
+						ng0.VolumeThroughput = aws.Int(maxThroughput + 1)
+						Expect(ValidateNodeGroup(0, ng0)).To(MatchError("value for nodeGroups[0].volumeThroughput must be within range 125-1000"))
+					})
+				})
+			})
+
+			When("VolumeType is one for which Throughput is not supported", func() {
+				It("returns an error", func() {
+					*ng0.VolumeType = NodeVolumeTypeGP2
+					Expect(ValidateNodeGroup(0, ng0)).To(MatchError("nodeGroups[0].volumeThroughput is only supported for gp3 volume type"))
+				})
+			})
+		})
+	})
+
 	Describe("nodeGroups[*].iam", func() {
 		var (
 			cfg *ClusterConfig
@@ -71,7 +180,7 @@ var _ = Describe("ClusterConfig validation", func() {
 				"arn:aws:iam::aws:policy/Bar",
 			}
 			ng0.IAM.WithAddonPolicies.ExternalDNS = Enabled()
-			ng0.IAM.WithAddonPolicies.ALBIngress = Enabled()
+			ng0.IAM.WithAddonPolicies.AWSLoadBalancerController = Enabled()
 			ng0.IAM.WithAddonPolicies.ImageBuilder = Enabled()
 
 			ng1 = cfg.NewNodeGroup()
@@ -255,7 +364,11 @@ var _ = Describe("ClusterConfig validation", func() {
 			err = ValidateClusterConfig(cfg)
 			Expect(err).To(HaveOccurred())
 
-			Expect(err.Error()).To(HavePrefix("iam.serviceAccounts[1].attachPolicyARNs or iam.serviceAccounts[1].attachPolicy must be set"))
+			Expect(err.Error()).To(SatisfyAll(
+				ContainSubstring("iam.serviceAccounts[1]"),
+				ContainSubstring("attachPolicy"),
+				ContainSubstring("must be set"),
+			))
 		})
 
 		It("should fail when non-uniquely named iam.serviceAccounts are given", func() {
@@ -722,9 +835,15 @@ var _ = Describe("ClusterConfig validation", func() {
 			}
 
 			ngs := map[string]*NodeGroup{
-				"PreBootstrapCommands":     {PreBootstrapCommands: []string{"/usr/bin/env true"}},
-				"OverrideBootstrapCommand": {OverrideBootstrapCommand: &cmd},
-				"KubeletExtraConfig":       {KubeletExtraConfig: &doc},
+				"PreBootstrapCommands": {
+					NodeGroupBase: &NodeGroupBase{
+						PreBootstrapCommands: []string{"/usr/bin/env true"},
+					}},
+				"OverrideBootstrapCommand": {
+					NodeGroupBase: &NodeGroupBase{
+						OverrideBootstrapCommand: &cmd,
+					}},
+				"KubeletExtraConfig": {KubeletExtraConfig: &doc},
 				"overlapping Bottlerocket settings": {
 					Bottlerocket: &NodeGroupBottlerocket{
 						Settings: &InlineDocument{
@@ -752,10 +871,7 @@ var _ = Describe("ClusterConfig validation", func() {
 			x := 32
 			ngs := []*NodeGroup{
 				{NodeGroupBase: &NodeGroupBase{Labels: map[string]string{"label": "label-value"}}},
-				{
-					MaxPodsPerNode: x,
-					NodeGroupBase:  &NodeGroupBase{},
-				},
+				{NodeGroupBase: &NodeGroupBase{MaxPodsPerNode: x}},
 				{
 					NodeGroupBase: &NodeGroupBase{
 						ScalingConfig: &ScalingConfig{
@@ -809,7 +925,7 @@ var _ = Describe("ClusterConfig validation", func() {
 			}
 
 			ngs := map[string]*NodeGroup{
-				"OverrideBootstrapCommand": {OverrideBootstrapCommand: &cmd, NodeGroupBase: &NodeGroupBase{}},
+				"OverrideBootstrapCommand": {NodeGroupBase: &NodeGroupBase{OverrideBootstrapCommand: &cmd}},
 				"KubeletExtraConfig":       {KubeletExtraConfig: &doc, NodeGroupBase: &NodeGroupBase{}},
 			}
 
@@ -824,9 +940,9 @@ var _ = Describe("ClusterConfig validation", func() {
 			x := 32
 			ngs := []*NodeGroup{
 				{NodeGroupBase: &NodeGroupBase{Labels: map[string]string{"label": "label-value"}}},
-				{MaxPodsPerNode: x, NodeGroupBase: &NodeGroupBase{}},
+				{NodeGroupBase: &NodeGroupBase{MaxPodsPerNode: x}},
 				{NodeGroupBase: &NodeGroupBase{ScalingConfig: &ScalingConfig{MinSize: &x}}},
-				{PreBootstrapCommands: []string{"start /wait msiexec.exe"}, NodeGroupBase: &NodeGroupBase{}},
+				{NodeGroupBase: &NodeGroupBase{PreBootstrapCommands: []string{"start /wait msiexec.exe"}}},
 			}
 
 			for i, ng := range ngs {
@@ -870,4 +986,10 @@ func checkItDetectsError(SSHConfig *NodeGroupSSH) {
 func newInt(value int) *int {
 	v := value
 	return &v
+}
+
+func newNodeGroup() *NodeGroup {
+	return &NodeGroup{
+		NodeGroupBase: &NodeGroupBase{},
+	}
 }

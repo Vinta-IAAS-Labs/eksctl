@@ -22,8 +22,12 @@ var _ = Describe("GenerateSchema", func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 	It("handles the top level definition", func() {
-		props := []string{"num", "option", "pointeroption", "packageoption", "aliasedint", "unknown", "other", "version", "kind"}
+		props := []string{
+			"num", "option", "pointeroption", "packageoption", "aliasedint", "unknown", "other", "version", "kind", "kinds", "sumType",
+		}
+		required := []string{"option"}
 		expected := Fields{
+			"Required":             Equal(required),
 			"PreferredOrder":       Equal(props),
 			"AdditionalProperties": Equal(false),
 			"Description":          Equal("describes some settings for _some_ things"),
@@ -62,7 +66,7 @@ var _ = Describe("GenerateSchema", func() {
 		expected := definition.Definition{
 			Type:                 "object",
 			Default:              "{}",
-			AdditionalProperties: &definition.Definition{Type: "string", Default: ""},
+			AdditionalProperties: &definition.Definition{Type: "string"},
 		}
 		Expect(configDef().Properties).To(HaveKey("other"))
 		Expect(*configDef().Properties["other"]).To(BeEquivalentTo(expected))
@@ -89,13 +93,26 @@ var _ = Describe("GenerateSchema", func() {
 		Expect(configDef().Properties).To(HaveKey("kind"))
 		Expect(*configDef().Properties["kind"]).To(BeEquivalentTo(expected))
 	})
+	It("handles enums by reference in lists", func() {
+		expected := definition.Definition{
+			Type: "array",
+			Items: &definition.Definition{
+				Type:    "string",
+				Default: "SecondKind",
+				Enum:    []string{"FirstKind", "SecondKind", "SpecialKind"},
+			},
+			Description:     "Valid entries are: `\"FirstKind\"` is legacy, `\"SecondKind\"` should be used (default) and this comment combines with secondKind, `\"SpecialKind\"` is from some other package.",
+			HTMLDescription: "Valid entries are: <code>&quot;FirstKind&quot;</code> is legacy, <code>&quot;SecondKind&quot;</code> should be used (default) and this comment combines with secondKind, <code>&quot;SpecialKind&quot;</code> is from some other package.",
+		}
+		Expect(configDef().Properties).To(HaveKey("kinds"))
+		Expect(*configDef().Properties["kinds"]).To(BeEquivalentTo(expected))
+	})
 	It("finds referenced structs", func() {
 		When("directly referenced", func() {
 			expected := definition.Definition{
 				Properties: map[string]*definition.Definition{
 					"kind": {
-						Type:    "string",
-						Default: "",
+						Type: "string",
 					},
 				},
 				PreferredOrder:       []string{"kind"},
@@ -105,7 +122,9 @@ var _ = Describe("GenerateSchema", func() {
 			}
 			Expect(*schema.Definitions["DirectType"]).To(BeEquivalentTo(expected))
 			ref := definition.Definition{
-				Ref: "#/definitions/DirectType",
+				Ref:             "#/definitions/DirectType",
+				Description:     "An option",
+				HTMLDescription: "An option",
 			}
 			Expect(configDef().Properties).To(HaveKey("option"))
 			Expect(*configDef().Properties["option"]).To(BeEquivalentTo(ref))
@@ -114,8 +133,7 @@ var _ = Describe("GenerateSchema", func() {
 			expected := definition.Definition{
 				Properties: map[string]*definition.Definition{
 					"kind": {
-						Type:    "string",
-						Default: "",
+						Type: "string",
 					},
 				},
 				PreferredOrder:       []string{"kind"},
@@ -134,8 +152,7 @@ var _ = Describe("GenerateSchema", func() {
 			expected := definition.Definition{
 				Properties: map[string]*definition.Definition{
 					"kind": {
-						Type:    "string",
-						Default: "",
+						Type: "string",
 					},
 				},
 				PreferredOrder:       []string{"kind"},
@@ -151,5 +168,28 @@ var _ = Describe("GenerateSchema", func() {
 			Expect(configDef().Properties).To(HaveKey("packageoption"))
 			Expect(*configDef().Properties["packageoption"]).To(BeEquivalentTo(refDef))
 		})
+	})
+	It("handles oneOf", func() {
+		refDef := definition.Definition{
+			Ref: "#/definitions/SumType",
+		}
+		Expect(configDef().Properties).To(HaveKey("sumType"))
+		Expect(*configDef().Properties["sumType"]).To(BeEquivalentTo(refDef))
+		expected := definition.Definition{
+			Properties: map[string]*definition.Definition{
+				"type": {
+					Type:            "string",
+					Enum:            []string{"a", "b"},
+					Description:     "Valid variants are: `\"a\"`: type A `\"b\"`: type B",
+					HTMLDescription: "Valid variants are: <code>&quot;a&quot;</code>: type A <code>&quot;b&quot;</code>: type B",
+				},
+			},
+			PreferredOrder: []string{"type"},
+			OneOf: []*definition.Definition{
+				{Ref: "#/definitions/SumTypeA"},
+				{Ref: "#/definitions/SumTypeB"},
+			},
+		}
+		Expect(*schema.Definitions["SumType"]).To(BeEquivalentTo(expected))
 	})
 })

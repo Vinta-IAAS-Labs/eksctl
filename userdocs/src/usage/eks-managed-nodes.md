@@ -4,16 +4,22 @@
 
 An EKS managed node group is an autoscaling group and associated EC2 instances that are managed by AWS for an Amazon EKS cluster. Each node group uses the Amazon EKS-optimized Amazon Linux 2 AMI. Amazon EKS makes it easy to apply bug fixes and security patches to nodes, as well as update them to the latest Kubernetes versions. Each node group launches an autoscaling group for your cluster, which can span multiple AWS VPC availability zones and subnets for high-availability.
 
+**NEW** [Launch Template support for managed nodegroups](launch-template-support.md)
 
 !!!info
     The term "unmanaged nodegroups" has been used to refer to nodegroups that eksctl has supported since the beginning and uses by default. The `ClusterConfig` file continues to use the `nodeGroups` field for defining unmanaged nodegroups, and a new field `managedNodeGroups` has been added for defining managed nodegroups.
 
-## Creating a cluster
+## Creating managed nodegroups
 
-You can add a managed node group to new or existing clusters. To create a new cluster with a managed nodegroup, run
+At the command line, add the `--managed` switch to use managed instead
+of unmanaged nodegroups.
+
+### New clusters
+
+To create a new cluster with a managed nodegroup, run
 
 ```console
-eksctl create cluster --managed
+$ eksctl create cluster --managed
 ```
 
 To create multiple managed nodegroups and have more control over the configuration, a config file can be used.
@@ -102,6 +108,46 @@ managedNodeGroups:
     maxSize: 3
 ```
 
+**NEW** Support for custom AMI, security groups, `instancePrefix`, `instanceName`, `ebsOptimized`, `volumeType`, `volumeName`,
+`volumeEncrypted`, `volumeKmsKeyID`, `volumeIOPS`, `maxPodsPerNode`, `preBootstrapCommands`, `overrideBootstrapCommand`, and `disableIMDSv1`
+
+
+```yaml
+# cluster.yaml
+# A cluster with an unmanaged nodegroup and two managed nodegroups.
+---
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: managed-cluster
+  region: us-west-2
+
+managedNodeGroups:
+  - name: custom-ng
+    ami: ami-0e124de4755b2734d
+    securityGroups:
+      attachIDs: ["sg-1234"]
+    maxPodsPerNode: 80
+    ssh:
+      allow: true
+    volumeSize: 100
+    volumeName: /dev/xvda
+    volumeEncrypted: true
+    disableIMDSv1: true
+    overrideBootstrapCommand: |
+      /etc/eks/bootstrap.sh managed-cluster --kubelet-extra-args '--node-labels=eks.amazonaws.com/nodegroup=custom-ng,eks.amazonaws.com/nodegroup-image=ami-0e124de4755b2734d'
+```
+
+
+### Existing clusters
+
+The same switch `--managed` can be used to create a new nodegroup for an
+existing cluster:
+
+```console
+$ eksctl create nodegroup --managed
+```
 
 ## Upgrading managed nodegroups
 You can update a nodegroup to the latest EKS-optimized AMI release version for the AMI type you are using at any time.
@@ -118,11 +164,11 @@ To upgrade a managed nodegroup to the latest AMI release version:
 eksctl upgrade nodegroup --name=managed-ng-1 --cluster=managed-cluster
 ```
 
-If a nodegroup is on Kubernetes 1.13, and the cluster's Kubernetes version is 1.14, the nodegroup can be upgraded to
-the latest AMI release for Kubernetes 1.14 using:
+If a nodegroup is on Kubernetes 1.14, and the cluster's Kubernetes version is 1.15, the nodegroup can be upgraded to
+the latest AMI release for Kubernetes 1.15 using:
 
 ```console
-eksctl upgrade nodegroup --name=managed-ng-1 --cluster=managed-cluster --kubernetes-version=1.14
+eksctl upgrade nodegroup --name=managed-ng-1 --cluster=managed-cluster --kubernetes-version=1.15
 ```
 
 ## Nodegroup Health issues
@@ -170,15 +216,13 @@ eksctl scale nodegroup --name=managed-ng-1 --cluster=managed-cluster --nodes=4 -
 EKS Managed Nodegroups are managed by AWS EKS and do not offer the same level of configuration as unmanaged nodegroups.
 The unsupported options are noted below.
 
-- Tags (`managedNodeGroups[*].tags`) in managed nodegroups apply to the EKS Nodegroup resource and do not propagate to
-the provisioned Autoscaling Group like in unmanaged nodegroups.
+- Tags (managedNodeGroups[*].tags) in managed nodegroups apply to the EKS Nodegroup resource and to the EC2 instances launched as part of the nodegroup.
+They do not propagate to the provisioned Autoscaling Group like in unmanaged nodegroups.
 - `iam.instanceProfileARN` is not supported for managed nodegroups.
 - The `amiFamily` field supports only `AmazonLinux2`
 - `instancesDistribution` field is not supported
-- `volumeSize` is the only field supported for configuring volumes
-- Control over the node bootstrapping process and customization of the kubelet are not supported. This includes the
-following fields: `classicLoadBalancerNames`, `maxPodsPerNode`, `taints`, `targetGroupARNs`, `preBootstrapCommands`, `overrideBootstrapCommand`,
-`clusterDNS` and `kubeletExtraConfig`.
+- Full control over the node bootstrapping process and customization of the kubelet are not supported. This includes the
+following fields: `classicLoadBalancerNames`, `taints`, `targetGroupARNs`, `clusterDNS` and `kubeletExtraConfig`.
 - No support for enabling metrics on AutoScalingGroups using `asgMetricsCollection`
 
 ## Note for eksctl versions below 0.12.0

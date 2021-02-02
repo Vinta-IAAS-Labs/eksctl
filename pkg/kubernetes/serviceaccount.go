@@ -1,6 +1,8 @@
 package kubernetes
 
 import (
+	"context"
+
 	"github.com/kris-nova/logger"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
@@ -23,7 +25,7 @@ func NewServiceAccount(meta metav1.ObjectMeta) *corev1.ServiceAccount {
 // returns boolean or an error
 func CheckServiceAccountExists(clientSet Interface, meta metav1.ObjectMeta) (bool, error) {
 	name := meta.Namespace + "/" + meta.Name
-	_, err := clientSet.CoreV1().ServiceAccounts(meta.Namespace).Get(meta.Name, metav1.GetOptions{})
+	_, err := clientSet.CoreV1().ServiceAccounts(meta.Namespace).Get(context.TODO(), meta.Name, metav1.GetOptions{})
 	if err == nil {
 		return true, nil
 	}
@@ -34,7 +36,7 @@ func CheckServiceAccountExists(clientSet Interface, meta metav1.ObjectMeta) (boo
 }
 
 // MaybeCreateServiceAccountOrUpdateMetadata will only create serviceaccount with the given name if
-// it doesn't already exist, it will also create namespace if needed; if serviceaccount exist - new
+// it doesn't already exist, it will also create namespace if needed; if serviceaccount exists, new
 // labels and annotations will get added, all user-set label and annotation keys that are not set in
 // meta will be retained
 func MaybeCreateServiceAccountOrUpdateMetadata(clientSet Interface, meta metav1.ObjectMeta) error {
@@ -48,7 +50,7 @@ func MaybeCreateServiceAccountOrUpdateMetadata(clientSet Interface, meta metav1.
 		return err
 	}
 	if !exists {
-		_, err = clientSet.CoreV1().ServiceAccounts(meta.Namespace).Create(NewServiceAccount(meta))
+		_, err = clientSet.CoreV1().ServiceAccounts(meta.Namespace).Create(context.TODO(), NewServiceAccount(meta), metav1.CreateOptions{})
 		if err != nil {
 			return err
 		}
@@ -58,7 +60,7 @@ func MaybeCreateServiceAccountOrUpdateMetadata(clientSet Interface, meta metav1.
 
 	logger.Info("serviceaccount %q already exists", name)
 
-	current, err := clientSet.CoreV1().ServiceAccounts(meta.Namespace).Get(meta.Name, metav1.GetOptions{})
+	current, err := clientSet.CoreV1().ServiceAccounts(meta.Namespace).Get(context.TODO(), meta.Name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -87,7 +89,7 @@ func MaybeCreateServiceAccountOrUpdateMetadata(clientSet Interface, meta metav1.
 		logger.Info("serviceaccount %q is already up-to-date", name)
 		return nil
 	}
-	_, err = clientSet.CoreV1().ServiceAccounts(meta.Namespace).Update(current)
+	_, err = clientSet.CoreV1().ServiceAccounts(meta.Namespace).Update(context.TODO(), current, metav1.UpdateOptions{})
 	if err != nil {
 		return err
 	}
@@ -106,7 +108,7 @@ func MaybeDeleteServiceAccount(clientSet Interface, meta metav1.ObjectMeta) erro
 		logger.Info("serviceaccount %q was already deleted", name)
 		return nil
 	}
-	err = clientSet.CoreV1().ServiceAccounts(meta.Namespace).Delete(meta.Name, &metav1.DeleteOptions{})
+	err = clientSet.CoreV1().ServiceAccounts(meta.Namespace).Delete(context.TODO(), meta.Name, metav1.DeleteOptions{})
 	if err != nil {
 		return err
 	}

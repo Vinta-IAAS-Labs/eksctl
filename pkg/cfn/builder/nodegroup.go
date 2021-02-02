@@ -14,6 +14,7 @@ import (
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 	"github.com/weaveworks/eksctl/pkg/cfn/outputs"
 	"github.com/weaveworks/eksctl/pkg/nodebootstrap"
+	"github.com/weaveworks/eksctl/pkg/vpc"
 )
 
 // NodeGroupResourceSet stores the resource information of the nodegroup
@@ -22,9 +23,9 @@ type NodeGroupResourceSet struct {
 	clusterSpec          *api.ClusterConfig
 	spec                 *api.NodeGroup
 	supportsManagedNodes bool
+	forceAddCNIPolicy    bool
 	provider             api.ClusterProvider
 	clusterStackName     string
-	nodeGroupName        string
 	instanceProfileARN   *gfnt.Value
 	securityGroups       []*gfnt.Value
 	vpc                  *gfnt.Value
@@ -33,12 +34,12 @@ type NodeGroupResourceSet struct {
 
 // NewNodeGroupResourceSet returns a resource set for a nodegroup embedded in a cluster config
 func NewNodeGroupResourceSet(provider api.ClusterProvider, spec *api.ClusterConfig, clusterStackName string, ng *api.NodeGroup,
-	supportsManagedNodes bool) *NodeGroupResourceSet {
+	supportsManagedNodes, forceAddCNIPolicy bool) *NodeGroupResourceSet {
 	return &NodeGroupResourceSet{
 		rs:                   newResourceSet(),
 		clusterStackName:     clusterStackName,
-		nodeGroupName:        ng.Name,
 		supportsManagedNodes: supportsManagedNodes,
+		forceAddCNIPolicy:    forceAddCNIPolicy,
 		clusterSpec:          spec,
 		spec:                 ng,
 		provider:             provider,
@@ -75,7 +76,7 @@ func (n *NodeGroupResourceSet) AddAllResources() error {
 		} else {
 			n.spec.MinSize = n.spec.DesiredCapacity
 		}
-		logger.Info("--nodes-min=%d was set automatically for nodegroup %s", *n.spec.MinSize, n.nodeGroupName)
+		logger.Info("--nodes-min=%d was set automatically for nodegroup %s", *n.spec.MinSize, n.spec.Name)
 	} else if n.spec.DesiredCapacity != nil && *n.spec.DesiredCapacity < *n.spec.MinSize {
 		return fmt.Errorf("cannot use --nodes-min=%d and --nodes=%d at the same time", *n.spec.MinSize, *n.spec.DesiredCapacity)
 	}
@@ -87,7 +88,7 @@ func (n *NodeGroupResourceSet) AddAllResources() error {
 		} else {
 			n.spec.MaxSize = n.spec.DesiredCapacity
 		}
-		logger.Info("--nodes-max=%d was set automatically for nodegroup %s", *n.spec.MaxSize, n.nodeGroupName)
+		logger.Info("--nodes-max=%d was set automatically for nodegroup %s", *n.spec.MaxSize, n.spec.Name)
 	} else if n.spec.DesiredCapacity != nil && *n.spec.DesiredCapacity > *n.spec.MaxSize {
 		return fmt.Errorf("cannot use --nodes-max=%d and --nodes=%d at the same time", *n.spec.MaxSize, *n.spec.DesiredCapacity)
 	} else if *n.spec.MaxSize < *n.spec.MinSize {
@@ -126,27 +127,45 @@ func (n *NodeGroupResourceSet) addResourcesForNodeGroup() error {
 
 	if volumeSize := n.spec.VolumeSize; volumeSize != nil && *volumeSize > 0 {
 		var (
-			kmsKeyID   *gfnt.Value
-			volumeIOPS *gfnt.Value
+			kmsKeyID         *gfnt.Value
+			volumeIOPS       *gfnt.Value
+			volumeThroughput *gfnt.Value
+			volumeType       = *n.spec.VolumeType
 		)
+
 		if api.IsSetAndNonEmptyString(n.spec.VolumeKmsKeyID) {
 			kmsKeyID = gfnt.NewString(*n.spec.VolumeKmsKeyID)
 		}
 
-		if *n.spec.VolumeType == api.NodeVolumeTypeIO1 {
+		if volumeType == api.NodeVolumeTypeIO1 || volumeType == api.NodeVolumeTypeGP3 {
 			volumeIOPS = gfnt.NewInteger(*n.spec.VolumeIOPS)
+		}
+
+		if volumeType == api.NodeVolumeTypeGP3 {
+			volumeThroughput = gfnt.NewInteger(*n.spec.VolumeThroughput)
 		}
 
 		launchTemplateData.BlockDeviceMappings = []gfnec2.LaunchTemplate_BlockDeviceMapping{{
 			DeviceName: gfnt.NewString(*n.spec.VolumeName),
 			Ebs: &gfnec2.LaunchTemplate_Ebs{
 				VolumeSize: gfnt.NewInteger(*volumeSize),
-				VolumeType: gfnt.NewString(*n.spec.VolumeType),
+				VolumeType: gfnt.NewString(volumeType),
 				Encrypted:  gfnt.NewBoolean(*n.spec.VolumeEncrypted),
 				KmsKeyId:   kmsKeyID,
 				Iops:       volumeIOPS,
+				Throughput: volumeThroughput,
 			},
 		}}
+
+		if n.spec.AdditionalEncryptedVolume != "" {
+			launchTemplateData.BlockDeviceMappings = append(launchTemplateData.BlockDeviceMappings, gfnec2.LaunchTemplate_BlockDeviceMapping{
+				DeviceName: gfnt.NewString(n.spec.AdditionalEncryptedVolume),
+				Ebs: &gfnec2.LaunchTemplate_Ebs{
+					Encrypted: gfnt.NewBoolean(*n.spec.VolumeEncrypted),
+					KmsKeyId:  kmsKeyID,
+				},
+			})
+		}
 	}
 
 	n.newResource("NodeGroupLaunchTemplate", &gfnec2.LaunchTemplate{
@@ -154,7 +173,7 @@ func (n *NodeGroupResourceSet) addResourcesForNodeGroup() error {
 		LaunchTemplateData: launchTemplateData,
 	})
 
-	vpcZoneIdentifier, err := AssignSubnets(n.spec.AvailabilityZones, n.clusterStackName, n.clusterSpec, n.spec.PrivateNetworking)
+	vpcZoneIdentifier, err := AssignSubnets(n.spec.NodeGroupBase, n.clusterStackName, n.clusterSpec)
 	if err != nil {
 		return err
 	}
@@ -162,7 +181,7 @@ func (n *NodeGroupResourceSet) addResourcesForNodeGroup() error {
 	tags := []map[string]interface{}{
 		{
 			"Key":               "Name",
-			"Value":             n.generateNodeName(),
+			"Value":             generateNodeName(n.spec.NodeGroupBase, n.clusterSpec.Metadata),
 			"PropagateAtLaunch": "true",
 		},
 		{
@@ -193,50 +212,36 @@ func (n *NodeGroupResourceSet) addResourcesForNodeGroup() error {
 }
 
 // generateNodeName formulates the name based on the configuration in input
-func (n *NodeGroupResourceSet) generateNodeName() string {
-	name := []string{}
-	if n.spec.InstancePrefix != "" {
-		name = append(name, n.spec.InstancePrefix, "-")
+func generateNodeName(ng *api.NodeGroupBase, meta *api.ClusterMeta) string {
+	var nameParts []string
+	if ng.InstancePrefix != "" {
+		nameParts = append(nameParts, ng.InstancePrefix, "-")
 	}
 	// this overrides the default naming convention
-	if n.spec.InstanceName != "" {
-		name = append(name, n.spec.InstanceName)
+	if ng.InstanceName != "" {
+		nameParts = append(nameParts, ng.InstanceName)
 	} else {
-		name = append(name, fmt.Sprintf("%s-%s-Node", n.clusterSpec.Metadata.Name, n.nodeGroupName))
+		nameParts = append(nameParts, fmt.Sprintf("%s-%s-Node", meta.Name, ng.Name))
 	}
-	return strings.Join(name, "")
+	return strings.Join(nameParts, "")
 }
 
 // AssignSubnets subnets based on the specified availability zones
-func AssignSubnets(availabilityZones []string, clusterStackName string, clusterSpec *api.ClusterConfig, privateNetworking bool) (*gfnt.Value, error) {
+func AssignSubnets(spec *api.NodeGroupBase, clusterStackName string, clusterSpec *api.ClusterConfig) (*gfnt.Value, error) {
 	// currently goformation type system doesn't allow specifying `VPCZoneIdentifier: { "Fn::ImportValue": ... }`,
 	// and tags don't have `PropagateAtLaunch` field, so we have a custom method here until this gets resolved
 
-	if numNodeGroupsAZs := len(availabilityZones); numNodeGroupsAZs > 0 {
-		subnets := clusterSpec.VPC.Subnets.Private
-		if !privateNetworking {
-			subnets = clusterSpec.VPC.Subnets.Public
+	if numNodeGroupsAZs, numNodeGroupsSubnets := len(spec.AvailabilityZones), len(spec.Subnets); numNodeGroupsAZs > 0 || numNodeGroupsSubnets > 0 {
+		subnets := clusterSpec.VPC.Subnets.Public
+		if spec.PrivateNetworking {
+			subnets = clusterSpec.VPC.Subnets.Private
 		}
-		makeErrorDesc := func() string {
-			return fmt.Sprintf("(subnets=%#v AZs=%#v)", subnets, availabilityZones)
-		}
-		if len(subnets) < numNodeGroupsAZs {
-			return nil, fmt.Errorf("VPC doesn't have enough subnets for nodegroup AZs %s", makeErrorDesc())
-		}
-		subnetIDs := make([]*gfnt.Value, numNodeGroupsAZs)
-		for i, az := range availabilityZones {
-			subnet, ok := subnets[az]
-			if !ok {
-				return nil, fmt.Errorf("VPC doesn't have subnets in %s %s", az, makeErrorDesc())
-			}
-
-			subnetIDs[i] = gfnt.NewString(subnet.ID)
-		}
-		return gfnt.NewSlice(subnetIDs...), nil
+		subnetIDs, err := vpc.SelectNodeGroupSubnets(spec.AvailabilityZones, spec.Subnets, subnets)
+		return gfnt.NewStringSlice(subnetIDs...), err
 	}
 
 	var subnets *gfnt.Value
-	if privateNetworking {
+	if spec.PrivateNetworking {
 		subnets = makeImportValue(clusterStackName, outputs.ClusterSubnetsPrivate)
 	} else {
 		subnets = makeImportValue(clusterStackName, outputs.ClusterSubnetsPublic)
@@ -251,10 +256,6 @@ func (n *NodeGroupResourceSet) GetAllOutputs(stack cfn.Stack) error {
 }
 
 func newLaunchTemplateData(n *NodeGroupResourceSet) *gfnec2.LaunchTemplate_LaunchTemplateData {
-	imdsv2TokensRequired := "optional"
-	if api.IsEnabled(n.spec.DisableIMDSv1) {
-		imdsv2TokensRequired = "required"
-	}
 
 	launchTemplateData := &gfnec2.LaunchTemplate_LaunchTemplateData{
 		IamInstanceProfile: &gfnec2.LaunchTemplate_IamInstanceProfile{
@@ -268,10 +269,7 @@ func newLaunchTemplateData(n *NodeGroupResourceSet) *gfnec2.LaunchTemplate_Launc
 			DeviceIndex:              gfnt.NewInteger(0),
 			Groups:                   gfnt.NewSlice(n.securityGroups...),
 		}},
-		MetadataOptions: &gfnec2.LaunchTemplate_MetadataOptions{
-			HttpPutResponseHopLimit: gfnt.NewInteger(2),
-			HttpTokens:              gfnt.NewString(imdsv2TokensRequired),
-		},
+		MetadataOptions: makeMetadataOptions(n.spec.NodeGroupBase),
 	}
 
 	if !api.HasMixedInstances(n.spec) {
@@ -289,7 +287,28 @@ func newLaunchTemplateData(n *NodeGroupResourceSet) *gfnec2.LaunchTemplate_Launc
 		}
 	}
 
+	if n.spec.Placement != nil {
+		launchTemplateData.Placement = &gfnec2.LaunchTemplate_Placement{
+			GroupName: gfnt.NewString(n.spec.Placement.GroupName),
+		}
+	}
+
 	return launchTemplateData
+}
+
+func makeMetadataOptions(ng *api.NodeGroupBase) *gfnec2.LaunchTemplate_MetadataOptions {
+	imdsv2TokensRequired := "optional"
+	if api.IsEnabled(ng.DisableIMDSv1) || api.IsEnabled(ng.DisablePodIMDS) {
+		imdsv2TokensRequired = "required"
+	}
+	hopLimit := 2
+	if api.IsEnabled(ng.DisablePodIMDS) {
+		hopLimit = 1
+	}
+	return &gfnec2.LaunchTemplate_MetadataOptions{
+		HttpPutResponseHopLimit: gfnt.NewInteger(hopLimit),
+		HttpTokens:              gfnt.NewString(imdsv2TokensRequired),
+	}
 }
 
 func nodeGroupResource(launchTemplateName *gfnt.Value, vpcZoneIdentifier interface{}, tags []map[string]interface{}, ng *api.NodeGroup) *awsCloudFormationResource {
@@ -324,14 +343,19 @@ func nodeGroupResource(launchTemplateName *gfnt.Value, vpcZoneIdentifier interfa
 		}
 	}
 
+	rollingUpdate := map[string]interface{}{
+		"MinInstancesInService": "0",
+		"MaxBatchSize":          "1",
+	}
+	if len(ng.ASGSuspendProcesses) > 0 {
+		rollingUpdate["SuspendProcesses"] = ng.ASGSuspendProcesses
+	}
+
 	return &awsCloudFormationResource{
 		Type:       "AWS::AutoScaling::AutoScalingGroup",
 		Properties: ngProps,
-		UpdatePolicy: map[string]map[string]string{
-			"AutoScalingRollingUpdate": {
-				"MinInstancesInService": "0",
-				"MaxBatchSize":          "1",
-			},
+		UpdatePolicy: map[string]map[string]interface{}{
+			"AutoScalingRollingUpdate": rollingUpdate,
 		},
 	}
 }

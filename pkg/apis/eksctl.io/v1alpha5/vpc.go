@@ -1,47 +1,131 @@
 package v1alpha5
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"reflect"
 
+	"github.com/pkg/errors"
 	"github.com/weaveworks/eksctl/pkg/utils/ipnet"
 )
 
+// Values for `ClusterNAT`
+const (
+	// ClusterHighlyAvailableNAT configures a highly available NAT gateway
+	ClusterHighlyAvailableNAT = "HighlyAvailable"
+
+	// ClusterSingleNAT configures a single NAT gateway
+	ClusterSingleNAT = "Single"
+
+	// ClusterDisableNAT disables NAT
+	ClusterDisableNAT = "Disable"
+
+	// (default)
+	ClusterNATDefault = ClusterSingleNAT
+)
+
+// AZSubnetMapping holds subnet to AZ mappings.
+// If the key is an AZ, that also becomes the name of the subnet
+// otherwise use the key to refer to this subnet.
+// Schema type is `map[string]AZSubnetSpec`
+type AZSubnetMapping map[string]AZSubnetSpec
+
+func NewAZSubnetMapping() AZSubnetMapping {
+	return AZSubnetMapping(make(map[string]AZSubnetSpec))
+}
+
+func AZSubnetMappingFromMap(m map[string]AZSubnetSpec) AZSubnetMapping {
+	for k := range m {
+		v := m[k]
+		if v.AZ == "" {
+			v.AZ = k
+			m[k] = v
+		}
+	}
+	return AZSubnetMapping(m)
+}
+
+func (m *AZSubnetMapping) Set(name string, spec AZSubnetSpec) {
+	if m == nil {
+		m = &AZSubnetMapping{}
+	}
+	(*m)[name] = spec
+}
+
+func (m *AZSubnetMapping) SetAZ(az string, spec Network) {
+	if m == nil {
+		m = &AZSubnetMapping{}
+	}
+	(*m)[az] = AZSubnetSpec{
+		ID:   spec.ID,
+		AZ:   az,
+		CIDR: spec.CIDR,
+	}
+}
+
+// UnmarshalJSON parses JSON data into a value
+func (m *AZSubnetMapping) UnmarshalJSON(b []byte) error {
+	// TODO we need to validate that the AZ property is maintained
+	var raw map[string]AZSubnetSpec
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+
+	*m = AZSubnetMappingFromMap(raw)
+	return nil
+}
+
 type (
-	// ClusterVPC holds global subnet and all child public/private subnet
+	// ClusterVPC holds global subnet and all child subnets
 	ClusterVPC struct {
+		// global CIDR and VPC ID
 		// +optional
-		Network // global CIDR and VPC ID
+		Network
+		// SecurityGroup for communication between control plane and nodes
 		// +optional
-		SecurityGroup string `json:"securityGroup,omitempty"` // cluster SG
-		// subnets are either public or private for use with separate
-		// nodegroups,
-		// these are keyed by AZ for convenience
+		SecurityGroup string `json:"securityGroup,omitempty"`
+		// Subnets are keyed by AZ for convenience.
+		// See [this example](/examples/reusing-iam-and-vpc/)
+		// as well as [using existing
+		// VPCs](/usage/vpc-networking/#use-existing-vpc-other-custom-configuration).
 		// +optional
 		Subnets *ClusterSubnets `json:"subnets,omitempty"`
-		// for additional CIDR associations, e.g. to use with separate CIDR for
+		// for additional CIDR associations, e.g. a CIDR for
 		// private subnets or any ad-hoc subnets
 		// +optional
 		ExtraCIDRs []*ipnet.IPNet `json:"extraCIDRs,omitempty"`
 		// for pre-defined shared node SG
 		SharedNodeSecurityGroup string `json:"sharedNodeSecurityGroup,omitempty"`
+		// AutoAllocateIPV6 requests an IPv6 CIDR block with /56 prefix for the VPC
 		// +optional
 		AutoAllocateIPv6 *bool `json:"autoAllocateIPv6,omitempty"`
 		// +optional
 		NAT *ClusterNAT `json:"nat,omitempty"`
+		// See [managing access to API](/usage/vpc-networking/#managing-access-to-the-kubernetes-api-server-endpoints)
 		// +optional
 		ClusterEndpoints *ClusterEndpoints `json:"clusterEndpoints,omitempty"`
+		// PublicAccessCIDRs are which CIDR blocks to allow access to public
+		// k8s API endpoint
 		// +optional
 		PublicAccessCIDRs []string `json:"publicAccessCIDRs,omitempty"`
 	}
 	// ClusterSubnets holds private and public subnets
 	ClusterSubnets struct {
-		Private map[string]Network `json:"private,omitempty"`
-		Public  map[string]Network `json:"public,omitempty"`
+		Private AZSubnetMapping `json:"private,omitempty"`
+		Public  AZSubnetMapping `json:"public,omitempty"`
 	}
 	// SubnetTopology can be SubnetTopologyPrivate or SubnetTopologyPublic
 	SubnetTopology string
+	AZSubnetSpec   struct {
+		// +optional
+		ID string `json:"id,omitempty"`
+		// AZ can be omitted if the key is an AZ
+		// +optional
+		AZ string `json:"az,omitempty"`
+		// +optional
+		CIDR *ipnet.IPNet `json:"cidr,omitempty"`
+	}
 	// Network holds ID and CIDR
 	Network struct {
 		// +optional
@@ -49,8 +133,9 @@ type (
 		// +optional
 		CIDR *ipnet.IPNet `json:"cidr,omitempty"`
 	}
-	// ClusterNAT holds NAT gateway configuration options
+	// ClusterNAT NAT config
 	ClusterNAT struct {
+		// Valid variants are `ClusterNAT` constants
 		Gateway *string `json:"gateway,omitempty"`
 	}
 
@@ -115,30 +200,73 @@ func (c *ClusterConfig) PublicSubnetIDs() []string {
 // ImportSubnet loads a given subnet into cluster config
 func (c *ClusterConfig) ImportSubnet(topology SubnetTopology, az, subnetID, cidr string) error {
 	if c.VPC.Subnets == nil {
-		c.VPC.Subnets = &ClusterSubnets{}
+		c.VPC.Subnets = &ClusterSubnets{
+			Private: NewAZSubnetMapping(),
+			Public:  NewAZSubnetMapping(),
+		}
 	}
 
 	switch topology {
 	case SubnetTopologyPrivate:
-		if c.VPC.Subnets.Private == nil {
-			c.VPC.Subnets.Private = make(map[string]Network)
+		if err := doImportSubnet(c.VPC.Subnets.Private, az, subnetID, cidr); err != nil {
+			return errors.Wrapf(err, "couldn't import subnet %s", subnetID)
 		}
-		return doImportSubnet(c.VPC.Subnets.Private, az, subnetID, cidr)
 	case SubnetTopologyPublic:
-		if c.VPC.Subnets.Public == nil {
-			c.VPC.Subnets.Public = make(map[string]Network)
+		if err := doImportSubnet(c.VPC.Subnets.Public, az, subnetID, cidr); err != nil {
+			return errors.Wrapf(err, "couldn't import subnet %s", subnetID)
 		}
-		return doImportSubnet(c.VPC.Subnets.Public, az, subnetID, cidr)
 	default:
 		return fmt.Errorf("unexpected subnet topology: %s", topology)
 	}
+	return nil
 }
 
-func doImportSubnet(subnets map[string]Network, az, subnetID, cidr string) error {
+// Note that the user must use
+// EITHER AZs as keys
+// OR names as keys and specify
+//    the ID (optionally with AZ and CIDR)
+//    OR AZ, optionally with CIDR
+// If a user specifies a subnet by AZ without CIDR and ID but multiple subnets
+// exist in this VPC, one will be arbitrarily chosen
+func doImportSubnet(subnets AZSubnetMapping, az, subnetID, cidr string) error {
 	subnetCIDR, _ := ipnet.ParseCIDR(cidr)
 
+	if subnets == nil {
+		return nil
+	}
+
 	if network, ok := subnets[az]; !ok {
-		subnets[az] = Network{ID: subnetID, CIDR: subnetCIDR}
+		newS := AZSubnetSpec{ID: subnetID, AZ: az, CIDR: subnetCIDR}
+		// Used if we find an exact ID match
+		var idKey string
+		// Used if we match to AZ/CIDR
+		var guessKey string
+		for k, s := range subnets {
+			if s.ID == "" {
+				if s.AZ != az || (s.CIDR.String() != "" && s.CIDR.String() != subnetCIDR.String()) {
+					continue
+				}
+				if guessKey != "" {
+					return fmt.Errorf("unable to unambiguously import subnet, found both %s and %s", guessKey, k)
+				}
+				guessKey = k
+			} else if s.ID == subnetID {
+				if s.CIDR.String() != "" && s.CIDR.String() != subnetCIDR.String() {
+					return fmt.Errorf("subnet CIDR %q is not the same as %q", s.CIDR.String(), subnetCIDR.String())
+				}
+				if idKey != "" {
+					return fmt.Errorf("unable to unambiguously import subnet, found both %s and %s", idKey, k)
+				}
+				idKey = k
+			}
+		}
+		if idKey != "" {
+			subnets[idKey] = newS
+		} else if guessKey != "" {
+			subnets[guessKey] = newS
+		} else {
+			subnets[az] = newS
+		}
 	} else {
 		if network.ID == "" {
 			network.ID = subnetID
@@ -150,6 +278,7 @@ func doImportSubnet(subnets map[string]Network, az, subnetID, cidr string) error
 		} else if network.CIDR.String() != subnetCIDR.String() {
 			return fmt.Errorf("subnet CIDR %q is not the same as %q", network.CIDR.String(), subnetCIDR.String())
 		}
+		network.AZ = az
 		subnets[az] = network
 	}
 	return nil

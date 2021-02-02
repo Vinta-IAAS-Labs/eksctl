@@ -1,6 +1,10 @@
 package drain
 
 import (
+	"time"
+
+	"github.com/weaveworks/eksctl/pkg/actions/nodegroup"
+
 	"github.com/kris-nova/logger"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -8,46 +12,47 @@ import (
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 	"github.com/weaveworks/eksctl/pkg/ctl/cmdutils"
 	"github.com/weaveworks/eksctl/pkg/ctl/cmdutils/filter"
-
-	"github.com/weaveworks/eksctl/pkg/drain"
 )
 
 func drainNodeGroupCmd(cmd *cmdutils.Cmd) {
-	drainNodeGroupWithRunFunc(cmd, func(cmd *cmdutils.Cmd, ng *api.NodeGroup, undo, onlyMissing bool) error {
-		return doDrainNodeGroup(cmd, ng, undo, onlyMissing)
+	drainNodeGroupWithRunFunc(cmd, func(cmd *cmdutils.Cmd, ng *api.NodeGroup, undo, onlyMissing bool, maxGracePeriod time.Duration) error {
+		return doDrainNodeGroup(cmd, ng, undo, onlyMissing, maxGracePeriod)
 	})
 }
 
-func drainNodeGroupWithRunFunc(cmd *cmdutils.Cmd, runFunc func(cmd *cmdutils.Cmd, ng *api.NodeGroup, undo, onlyMissing bool) error) {
+func drainNodeGroupWithRunFunc(cmd *cmdutils.Cmd, runFunc func(cmd *cmdutils.Cmd, ng *api.NodeGroup, undo, onlyMissing bool, maxGracePeriod time.Duration) error) {
 	cfg := api.NewClusterConfig()
-	ng := cfg.NewNodeGroup()
+	ng := api.NewNodeGroup()
 	cmd.ClusterConfig = cfg
 
 	var undo, onlyMissing bool
+	var maxGracePeriod time.Duration
 
 	cmd.SetDescription("nodegroup", "Cordon and drain a nodegroup", "", "ng")
 
 	cmd.CobraCommand.RunE = func(_ *cobra.Command, args []string) error {
 		cmd.NameArg = cmdutils.GetNameArg(args)
-		return runFunc(cmd, ng, undo, onlyMissing)
+		return runFunc(cmd, ng, undo, onlyMissing, maxGracePeriod)
 	}
 
 	cmd.FlagSetGroup.InFlagSet("General", func(fs *pflag.FlagSet) {
 		fs.StringVar(&cfg.Metadata.Name, "cluster", "", "EKS cluster name")
 		cmdutils.AddRegionFlag(fs, &cmd.ProviderConfig)
-		fs.StringVarP(&ng.Name, "name", "n", "", "Name of the nodegroup to delete")
+		fs.StringVarP(&ng.Name, "name", "n", "", "Name of the nodegroup to drain")
 		cmdutils.AddConfigFileFlag(fs, &cmd.ClusterConfigFile)
 		cmdutils.AddApproveFlag(fs, cmd)
 		cmdutils.AddNodeGroupFilterFlags(fs, &cmd.Include, &cmd.Exclude)
 		fs.BoolVar(&onlyMissing, "only-missing", false, "Only drain nodegroups that are not defined in the given config file")
-		fs.BoolVar(&undo, "undo", false, "Uncordone the nodegroup")
+		fs.BoolVar(&undo, "undo", false, "Uncordon the nodegroup")
+		defaultMaxGracePeriod, _ := time.ParseDuration("10m")
+		fs.DurationVar(&maxGracePeriod, "max-grace-period", defaultMaxGracePeriod, "Maximum pods termination grace period")
 		cmdutils.AddTimeoutFlag(fs, &cmd.ProviderConfig.WaitTimeout)
 	})
 
 	cmdutils.AddCommonFlagsForAWS(cmd.FlagSetGroup, &cmd.ProviderConfig, true)
 }
 
-func doDrainNodeGroup(cmd *cmdutils.Cmd, ng *api.NodeGroup, undo, onlyMissing bool) error {
+func doDrainNodeGroup(cmd *cmdutils.Cmd, ng *api.NodeGroup, undo, onlyMissing bool, maxGracePeriod time.Duration) error {
 	ngFilter := filter.NewNodeGroupFilter()
 
 	if err := cmdutils.NewDeleteNodeGroupLoader(cmd, ng, ngFilter).Load(); err != nil {
@@ -80,12 +85,18 @@ func doDrainNodeGroup(cmd *cmdutils.Cmd, ng *api.NodeGroup, undo, onlyMissing bo
 	if cmd.ClusterConfigFile != "" {
 		logger.Info("comparing %d nodegroups defined in the given config (%q) against remote state", len(cfg.NodeGroups), cmd.ClusterConfigFile)
 		if onlyMissing {
-			err = ngFilter.SetOnlyRemote(stackManager, cfg)
+			err = ngFilter.SetOnlyRemote(ctl.Provider.EKS(), stackManager, cfg)
 			if err != nil {
 				return err
 			}
 		}
+	} else {
+		err := cmdutils.PopulateNodegroup(stackManager, ng.Name, cfg, ctl.Provider)
+		if err != nil {
+			return err
+		}
 	}
+
 	logFiltered := cmdutils.ApplyFilter(cfg, ngFilter)
 
 	verb := "drain"
@@ -107,10 +118,6 @@ func doDrainNodeGroup(cmd *cmdutils.Cmd, ng *api.NodeGroup, undo, onlyMissing bo
 		return nil
 	}
 	allNodeGroups := cmdutils.ToKubeNodeGroups(cfg)
-	for _, ng := range allNodeGroups {
-		if err := drain.NodeGroup(clientSet, ng, ctl.Provider.WaitTimeout(), undo); err != nil {
-			return err
-		}
-	}
-	return nil
+
+	return nodegroup.New(cfg, ctl, clientSet).Drain(allNodeGroups, cmd.Plan, maxGracePeriod)
 }

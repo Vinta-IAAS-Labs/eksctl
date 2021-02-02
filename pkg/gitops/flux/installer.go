@@ -10,11 +10,10 @@ import (
 	"time"
 
 	fluxinstall "github.com/fluxcd/flux/pkg/install"
+	"github.com/fluxcd/go-git-providers/gitprovider"
 	helmopinstall "github.com/fluxcd/helm-operator/pkg/install"
 	"github.com/kris-nova/logger"
 	"github.com/pkg/errors"
-	"github.com/weaveworks/go-git-providers/pkg/key"
-	"github.com/weaveworks/go-git-providers/pkg/providers"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubeclient "k8s.io/client-go/kubernetes"
@@ -22,6 +21,7 @@ import (
 
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 	"github.com/weaveworks/eksctl/pkg/git"
+	"github.com/weaveworks/eksctl/pkg/gitops/deploykey"
 	"github.com/weaveworks/eksctl/pkg/kubernetes"
 )
 
@@ -143,17 +143,21 @@ func (fi *Installer) Run(ctx context.Context) (string, error) {
 	instruction := fmt.Sprintf("please configure %s so that the following Flux SSH public key has write access to it\n%s",
 		fi.opts.Repo.URL, fluxSSHKey.Key)
 
-	gitProvider, err := providers.GetProvider(fi.cfg.Git.Repo.URL)
+	client, err := deploykey.GetDeployKeyClient(ctx, fi.cfg.Git.Repo.URL)
 	if err != nil {
-		logger.Warning("could not find git provider implementation for url %q: %q. Skipping authorization of SSH key", fi.cfg.Git.Repo.URL, err.Error())
+		logger.Warning(
+			"could not find git provider implementation for url %q: %q. Skipping authorization of SSH key",
+			fi.cfg.Git.Repo.URL,
+			err.Error(),
+		)
 		return instruction, nil
 	}
 
 	keyTitle := KeyTitle(*fi.cfg.Metadata)
-	err = gitProvider.AuthorizeSSHKey(ctx, key.SSHKey{
-		Title:    keyTitle,
-		Key:      fluxSSHKey.Key,
-		ReadOnly: fi.cfg.Git.Operator.ReadOnly,
+	_, _, err = client.Reconcile(ctx, gitprovider.DeployKeyInfo{
+		Name:     keyTitle,
+		Key:      []byte(fluxSSHKey.Key),
+		ReadOnly: &fi.cfg.Git.Operator.ReadOnly,
 	})
 	if err != nil {
 		return instruction, errors.Wrapf(err, "could not authorize SSH key")
@@ -166,7 +170,7 @@ func (fi *Installer) Run(ctx context.Context) (string, error) {
 // IsFluxInstalled returns an error if Flux is not installed in the cluster. To determine that it looks for the flux
 // pod
 func (fi *Installer) IsFluxInstalled() (bool, error) {
-	_, err := fi.k8sClientSet.AppsV1().Deployments(fi.opts.Operator.Namespace).Get("flux", metav1.GetOptions{})
+	_, err := fi.k8sClientSet.AppsV1().Deployments(fi.opts.Operator.Namespace).Get(context.TODO(), "flux", metav1.GetOptions{})
 	if err != nil {
 		if apierrs.IsNotFound(err) {
 			logger.Warning("flux deployment was not found")
@@ -281,7 +285,7 @@ func (fi *Installer) getManifests() (map[string][]byte, error) {
 	if !api.IsEnabled(fi.opts.Operator.WithHelm) {
 		return manifests, nil
 	}
-	helmOpManifests, err := getHelmOpManifests(fi.opts.Operator.Namespace)
+	helmOpManifests, err := getHelmOpManifests(fi.opts.Operator.Namespace, fi.opts.Operator.AdditionalHelmOperatorArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -301,6 +305,7 @@ func getFluxManifests(opts *api.Git, cs kubeclient.Interface) (map[string][]byte
 	}
 
 	additionalFluxArgs := []string{"--sync-garbage-collection"}
+	additionalFluxArgs = append(additionalFluxArgs, opts.Operator.AdditionalFluxArgs...)
 	if opts.Operator.ReadOnly {
 		additionalFluxArgs = append(additionalFluxArgs, "--registry-disable-scanning")
 	}
@@ -324,11 +329,12 @@ func getFluxManifests(opts *api.Git, cs kubeclient.Interface) (map[string][]byte
 	return mergeMaps(manifests, fluxManifests), nil
 }
 
-func getHelmOpManifests(namespace string) (map[string][]byte, error) {
+func getHelmOpManifests(namespace string, additionalHelmOperatorArgs []string) (map[string][]byte, error) {
 	helmOpParameters := helmopinstall.TemplateParameters{
-		Namespace:     namespace,
-		HelmVersions:  fluxHelmVersions,
-		SSHSecretName: fluxPrivateSSHKeySecretName,
+		Namespace:      namespace,
+		AdditionalArgs: additionalHelmOperatorArgs,
+		HelmVersions:   fluxHelmVersions,
+		SSHSecretName:  fluxPrivateSSHKeySecretName,
 	}
 	manifests, err := helmopinstall.FillInTemplates(helmOpParameters)
 	if err != nil {

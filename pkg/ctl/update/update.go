@@ -11,6 +11,8 @@ func Command(flagGrouping *cmdutils.FlagGrouping) *cobra.Command {
 	verbCmd := cmdutils.NewVerbCmd("update", "Update resource(s)", "")
 
 	cmdutils.AddResourceCmd(flagGrouping, verbCmd, updateClusterCmd)
+	cmdutils.AddResourceCmd(flagGrouping, verbCmd, updateAddonCmd)
+	cmdutils.AddResourceCmd(flagGrouping, verbCmd, updateIAMServiceAccountCmd)
 
 	return verbCmd
 }

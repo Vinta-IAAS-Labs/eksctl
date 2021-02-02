@@ -3,6 +3,12 @@ package filter
 import (
 	"bytes"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/service/eks"
+	"github.com/stretchr/testify/mock"
+
+	"github.com/weaveworks/eksctl/pkg/testutils/mockprovider"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
@@ -23,8 +29,9 @@ var _ = Describe("nodegroup filter", func() {
 
 	Context("Match", func() {
 		var (
-			filter *NodeGroupFilter
-			cfg    *api.ClusterConfig
+			filter       *NodeGroupFilter
+			cfg          *api.ClusterConfig
+			mockProvider *mockprovider.MockProvider
 		)
 
 		BeforeEach(func() {
@@ -33,6 +40,9 @@ var _ = Describe("nodegroup filter", func() {
 			addGroupB(cfg)
 
 			filter = NewNodeGroupFilter()
+
+			mockProvider = mockprovider.NewMockProvider()
+			mockProvider.MockEKS().On("ListNodegroups", mock.Anything).Return(&eks.ListNodegroupsOutput{Nodegroups: nil}, nil)
 		})
 
 		It("regression: should only match the ones included in the filter when non existing ngs are present in the config file", func() {
@@ -69,7 +79,7 @@ var _ = Describe("nodegroup filter", func() {
 				"non-existing-in-cfg-1",
 				"non-existing-in-cfg-2",
 			)
-			err := filter.SetOnlyRemote(mockLister, cfg)
+			err := filter.SetOnlyRemote(mockProvider.EKS(), mockLister, cfg)
 			Expect(err).ToNot(HaveOccurred())
 
 			included, excluded := filter.matchAll(filter.collectNames(cfg.NodeGroups))
@@ -95,7 +105,7 @@ var _ = Describe("nodegroup filter", func() {
 				"test-ng2a",
 				"test-ng3a",
 			)
-			err = filter.SetOnlyLocal(mockLister, cfg)
+			err = filter.SetOnlyLocal(mockProvider.EKS(), mockLister, cfg)
 			Expect(err).ToNot(HaveOccurred())
 
 			included, excluded := filter.matchAll(filter.collectNames(cfg.NodeGroups))
@@ -114,7 +124,7 @@ var _ = Describe("nodegroup filter", func() {
 				"test-ng1b",
 				"test-ng2b",
 			)
-			err = filter.SetOnlyLocal(mockLister, cfg)
+			err = filter.SetOnlyLocal(mockProvider.EKS(), mockLister, cfg)
 			Expect(err).ToNot(HaveOccurred())
 
 			err = filter.AppendExcludeGlobs("test-ng1a", "test-ng2?")
@@ -265,14 +275,13 @@ func addGroupA(cfg *api.ClusterConfig) {
 
 	var (
 		ng1aVolSize = 768
-		ng1aVolType = api.NodeVolumeTypeIO1
-		ng1aVolIOPS = 200
+		ng1aVolIOPS = 100
 	)
 
 	ng = cfg.NewNodeGroup()
 	ng.Name = "test-ng1a"
 	ng.VolumeSize = &ng1aVolSize
-	ng.VolumeType = &ng1aVolType
+	ng.VolumeType = aws.String(api.NodeVolumeTypeIO1)
 	ng.VolumeIOPS = &ng1aVolIOPS
 	ng.IAM.AttachPolicyARNs = []string{"arn:aws:iam::aws:policy/Foo"}
 	ng.Labels = map[string]string{"group": "a", "seq": "1"}
@@ -280,6 +289,7 @@ func addGroupA(cfg *api.ClusterConfig) {
 
 	ng = cfg.NewNodeGroup()
 	ng.Name = "test-ng2a"
+	ng.VolumeType = aws.String(api.NodeVolumeTypeGP2)
 	ng.IAM.AttachPolicyARNs = []string{"arn:aws:iam::aws:policy/Bar"}
 	ng.Labels = map[string]string{"group": "a", "seq": "2"}
 	ng.SSH = nil
@@ -329,9 +339,11 @@ const expected = `
 		"metadata": {
 		  "name": "test-3x3-ngs",
 		  "region": "eu-central-1",
-		  "version": "1.17"
+		  "version": "1.18"
 		},
-		"iam": {},
+		"iam": {
+		  "withOIDC": false
+		},
 		"vpc": {
 			"cidr": "192.168.0.0/16",
 			"autoAllocateIPv6": false,
@@ -358,7 +370,8 @@ const expected = `
 			  },
 			  "volumeSize": 768,
 			  "volumeType": "io1",
-			  "volumeIOPS": 200,
+              "AdditionalEncryptedVolume": "",
+			  "volumeIOPS": 100,
 			  "labels": {
 				"alpha.eksctl.io/cluster-name": "test-3x3-ngs",
 				"alpha.eksctl.io/nodegroup-name": "test-ng1a",
@@ -386,7 +399,9 @@ const expected = `
 				  "xRay": false,
 				  "cloudWatch": false
 			    }
-			  }
+			  },
+			  "disableIMDSv1": false,
+			  "disablePodIMDS": false
 		  },
 		  {
 			  "name": "test-ng2a",
@@ -399,6 +414,7 @@ const expected = `
 			  },
 			  "volumeSize": 80,
 			  "volumeType": "gp2",
+              "AdditionalEncryptedVolume": "",
 			  "labels": {
 				"alpha.eksctl.io/cluster-name": "test-3x3-ngs",
 				"alpha.eksctl.io/nodegroup-name": "test-ng2a",
@@ -426,7 +442,9 @@ const expected = `
 				  "xRay": false,
 				  "cloudWatch": false
 			    }
-			  }
+			  },
+			  "disableIMDSv1": false,
+			  "disablePodIMDS": false
 		  },
 		  {
 			  "name": "test-ng3a",
@@ -438,7 +456,10 @@ const expected = `
 			    "withLocal": true
 			  },
 			  "volumeSize": 80,
-			  "volumeType": "gp2",
+			  "volumeType": "gp3",
+				"volumeIOPS": 3000,
+				"volumeThroughput": 125,
+              "AdditionalEncryptedVolume": "",
 			  "labels": {
 				"alpha.eksctl.io/cluster-name": "test-3x3-ngs",
 				"alpha.eksctl.io/nodegroup-name": "test-ng3a",
@@ -465,7 +486,9 @@ const expected = `
 				  "cloudWatch": false
 			    }
 			  },
-			  "clusterDNS": "1.2.3.4"
+			  "clusterDNS": "1.2.3.4",
+			  "disableIMDSv1": false,
+			  "disablePodIMDS": false
 		  },
 		  {
 			  "name": "test-ng1b",
@@ -477,7 +500,10 @@ const expected = `
 			    "withLocal": true
 			  },
 			  "volumeSize": 80,
-			  "volumeType": "gp2",
+			  "volumeType": "gp3",
+				"volumeIOPS": 3000,
+				"volumeThroughput": 125,
+              "AdditionalEncryptedVolume": "",
 			  "labels": {
 				"alpha.eksctl.io/cluster-name": "test-3x3-ngs",
 				"alpha.eksctl.io/nodegroup-name": "test-ng1b",
@@ -503,7 +529,9 @@ const expected = `
 				  "xRay": false,
 				  "cloudWatch": false
 			    }
-			  }
+			  },
+			  "disableIMDSv1": false,
+			  "disablePodIMDS": false
 		  },
 		  {
 			  "name": "test-ng2b",
@@ -519,7 +547,10 @@ const expected = `
 			    "withLocal": false
 			  },
 			  "volumeSize": 80,
-			  "volumeType": "gp2",
+			  "volumeType": "gp3",
+				"volumeIOPS": 3000,
+				"volumeThroughput": 125,
+              "AdditionalEncryptedVolume": "",
 			  "labels": {
 				"alpha.eksctl.io/cluster-name": "test-3x3-ngs",
 				"alpha.eksctl.io/nodegroup-name": "test-ng2b",
@@ -545,7 +576,9 @@ const expected = `
 				  "cloudWatch": false
 			    }
 			  },
-			  "clusterDNS": "4.2.8.14"
+			  "clusterDNS": "4.2.8.14",
+			  "disableIMDSv1": false,
+			  "disablePodIMDS": false
 		  },
 		  {
 			  "name": "test-ng3b",
@@ -561,7 +594,10 @@ const expected = `
 			    "withLocal": false
 			  },
 			  "volumeSize": 192,
-			  "volumeType": "gp2",
+			  "volumeType": "gp3",
+				"volumeIOPS": 3000,
+				"volumeThroughput": 125,
+              "AdditionalEncryptedVolume": "",
 			  "labels": {
 				"alpha.eksctl.io/cluster-name": "test-3x3-ngs",
 				"alpha.eksctl.io/nodegroup-name": "test-ng3b",
@@ -586,7 +622,9 @@ const expected = `
 				  "xRay": false,
 				  "cloudWatch": false
 			    }
-			  }
+			  },
+			  "disableIMDSv1": false,
+			  "disablePodIMDS": false
 		  }
 		]
   }

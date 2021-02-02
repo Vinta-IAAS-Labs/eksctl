@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"path"
 	"path/filepath"
 	"strings"
 	"text/template"
@@ -42,6 +43,7 @@ const (
 	vpcID          = "vpc-0e265ad953062b94b"
 	subnetsPublic  = "subnet-0f98135715dfcf55f,subnet-0ade11bad78dced9e,subnet-0e2e63ff1712bf6ef"
 	subnetsPrivate = "subnet-0f98135715dfcf55a,subnet-0ade11bad78dced9f,subnet-0e2e63ff1712bf6ea"
+	scriptPath     = "/var/lib/cloud/scripts/eksctl/"
 )
 
 var overrideBootstrapCommand = "echo foo > /etc/test_foo; echo bar > /etc/test_bar; poweroff -fn;"
@@ -62,9 +64,10 @@ type Properties struct {
 
 	PolicyDocument struct {
 		Statement []struct {
-			Action   []string
-			Effect   string
-			Resource interface{}
+			Action    []string
+			Effect    string
+			Resource  interface{}
+			Condition map[string]interface{}
 		}
 	}
 
@@ -140,8 +143,9 @@ type LaunchTemplateData struct {
 type Template struct {
 	Description string
 	Resources   map[string]struct {
-		Properties Properties
-		DependsOn  []string
+		Properties   Properties
+		DependsOn    []string
+		UpdatePolicy map[string]map[string]interface{}
 	}
 }
 
@@ -254,7 +258,7 @@ func testVPC() *api.ClusterVPC {
 		SharedNodeSecurityGroup: "sg-shared",
 		AutoAllocateIPv6:        api.Disabled(),
 		Subnets: &api.ClusterSubnets{
-			Public: map[string]api.Network{
+			Public: api.AZSubnetMappingFromMap(map[string]api.AZSubnetSpec{
 				"us-west-2b": {
 					ID: "subnet-0f98135715dfcf55f",
 					CIDR: &ipnet.IPNet{
@@ -282,8 +286,8 @@ func testVPC() *api.ClusterVPC {
 						},
 					},
 				},
-			},
-			Private: map[string]api.Network{
+			}),
+			Private: api.AZSubnetMappingFromMap(map[string]api.AZSubnetSpec{
 				"us-west-2b": {
 					ID: "subnet-0f98135715dfcf55a",
 					CIDR: &ipnet.IPNet{
@@ -311,7 +315,7 @@ func testVPC() *api.ClusterVPC {
 						},
 					},
 				},
-			},
+			}),
 		},
 		ClusterEndpoints: &api.ClusterEndpoints{},
 	}
@@ -428,7 +432,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 		}, nil)
 
 		for t := range subnetLists {
-			fn := func(list string, subnetsByAz map[string]api.Network) {
+			fn := func(list string, subnetsByAz map[string]api.AZSubnetSpec) {
 				subnets := strings.Split(list, ",")
 
 				output := &ec2.DescribeSubnetsOutput{
@@ -469,7 +473,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Metadata: &api.ClusterMeta{
 				Region:  "us-west-2",
 				Name:    clusterName,
-				Version: "1.17",
+				Version: "1.18",
 			},
 			Status: &api.ClusterStatus{
 				Endpoint:                 endpoint,
@@ -479,6 +483,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 			AvailabilityZones: testAZs,
 			VPC:               testVPC(),
 			IAM: &api.ClusterIAM{
+				WithOIDC:       api.Disabled(),
 				ServiceRoleARN: aws.String(arn),
 			},
 			CloudWatch: &api.ClusterCloudWatch{
@@ -495,18 +500,18 @@ var _ = Describe("CloudFormation template builder API", func() {
 						VolumeSize:        aws.Int(2),
 						IAM: &api.NodeGroupIAM{
 							WithAddonPolicies: api.NodeGroupIAMAddonPolicies{
-								ImageBuilder:   api.Disabled(),
-								AutoScaler:     api.Disabled(),
-								ExternalDNS:    api.Disabled(),
-								CertManager:    api.Disabled(),
-								AppMesh:        api.Disabled(),
-								AppMeshPreview: api.Disabled(),
-								EBS:            api.Disabled(),
-								FSX:            api.Disabled(),
-								EFS:            api.Disabled(),
-								ALBIngress:     api.Disabled(),
-								XRay:           api.Disabled(),
-								CloudWatch:     api.Disabled(),
+								ImageBuilder:              api.Disabled(),
+								AutoScaler:                api.Disabled(),
+								ExternalDNS:               api.Disabled(),
+								CertManager:               api.Disabled(),
+								AppMesh:                   api.Disabled(),
+								AppMeshPreview:            api.Disabled(),
+								EBS:                       api.Disabled(),
+								FSX:                       api.Disabled(),
+								EFS:                       api.Disabled(),
+								AWSLoadBalancerController: api.Disabled(),
+								XRay:                      api.Disabled(),
+								CloudWatch:                api.Disabled(),
 							},
 						},
 						ScalingConfig: &api.ScalingConfig{},
@@ -514,18 +519,19 @@ var _ = Describe("CloudFormation template builder API", func() {
 							Allow:         api.Disabled(),
 							PublicKeyPath: &api.DefaultNodeSSHPublicKeyPath,
 						},
+						AMI: "",
+						SecurityGroups: &api.NodeGroupSGs{
+							WithLocal:  api.Enabled(),
+							WithShared: api.Enabled(),
+							AttachIDs:  []string{},
+						},
+						VolumeType:      aws.String(api.NodeVolumeTypeSC1),
+						VolumeName:      aws.String("/dev/xvda"),
+						VolumeEncrypted: api.Disabled(),
+						VolumeKmsKeyID:  aws.String(""),
+						DisableIMDSv1:   api.Disabled(),
+						DisablePodIMDS:  api.Disabled(),
 					},
-					AMI: "",
-					SecurityGroups: &api.NodeGroupSGs{
-						WithLocal:  api.Enabled(),
-						WithShared: api.Enabled(),
-						AttachIDs:  []string{},
-					},
-
-					VolumeType:      aws.String(api.NodeVolumeTypeSC1),
-					VolumeName:      aws.String("/dev/xvda"),
-					VolumeEncrypted: api.Disabled(),
-					VolumeKmsKeyID:  aws.String(""),
 				},
 			},
 		}
@@ -574,7 +580,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 			err = crs.AddAllResources()
 			Expect(err).ShouldNot(HaveOccurred())
 
-			ngrs = NewNodeGroupResourceSet(p, cfg, clusterStackName, ng, managedNodesSupport)
+			ngrs = NewNodeGroupResourceSet(p, cfg, clusterStackName, ng, managedNodesSupport, false)
 			err = ngrs.AddAllResources()
 			Expect(err).ShouldNot(HaveOccurred())
 
@@ -1060,13 +1066,22 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Expect(policy2.PolicyDocument.Statement[0].Action).To(Equal([]string{
 				"route53:ListResourceRecordSets",
 				"route53:ListHostedZonesByName",
+			}))
+
+			policy3 := ngTemplate.Resources["PolicyExternalDNSHostedZones"].Properties
+
+			Expect(policy3.Roles).To(HaveLen(1))
+			isRefTo(policy3.Roles[0], "NodeInstanceRole")
+			Expect(policy3.PolicyDocument.Statement).To(HaveLen(1))
+			Expect(policy3.PolicyDocument.Statement[0].Effect).To(Equal("Allow"))
+			Expect(policy3.PolicyDocument.Statement[0].Resource).To(Equal("*"))
+			Expect(policy3.PolicyDocument.Statement[0].Action).To(Equal([]string{
 				"route53:ListHostedZones",
+				"route53:ListResourceRecordSets",
 				"route53:ListTagsForResource",
 			}))
 
 			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyAutoScaling"))
-			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyExternalDNSChangeSet"))
-			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyExternalDNSHostedZones"))
 			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyAppMesh"))
 			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyAppMeshPreview"))
 			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyEBS"))
@@ -1074,7 +1089,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyServiceLinkRole"))
 			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyEFS"))
 			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyEFSEC2"))
-			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyALBIngress"))
+			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyAWSLoadBalancerController"))
 			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyXRay"))
 		})
 
@@ -1281,15 +1296,15 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyServiceLinkRole"))
 			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyEFS"))
 			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyEFSEC2"))
-			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyALBIngress"))
+			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyAWSLoadBalancerController"))
 			Expect(ngTemplate.Resources).ToNot(HaveKey("PolicyXRay"))
 		})
 	})
 
-	Context("NodeGroupALBIngress", func() {
+	Context("NodeGroupAWSLoadBalancerController", func() {
 		cfg, ng := newClusterConfigAndNodegroup(true)
 
-		ng.IAM.WithAddonPolicies.ALBIngress = api.Enabled()
+		ng.IAM.WithAddonPolicies.AWSLoadBalancerController = api.Enabled()
 
 		build(cfg, "eksctl-test-megaapps-cluster", ng)
 
@@ -1298,94 +1313,143 @@ var _ = Describe("CloudFormation template builder API", func() {
 		It("should have correct policies", func() {
 			Expect(ngTemplate.Resources).ToNot(BeEmpty())
 
-			Expect(ngTemplate.Resources).To(HaveKey("PolicyALBIngress"))
+			Expect(ngTemplate.Resources).To(HaveKey("PolicyAWSLoadBalancerController"))
 
-			policy := ngTemplate.Resources["PolicyALBIngress"].Properties
+			policy := ngTemplate.Resources["PolicyAWSLoadBalancerController"].Properties
 
 			Expect(policy.Roles).To(HaveLen(1))
 			isRefTo(policy.Roles[0], "NodeInstanceRole")
 
-			Expect(policy.PolicyDocument.Statement).To(HaveLen(1))
+			Expect(policy.PolicyDocument.Statement).To(HaveLen(7))
+
 			Expect(policy.PolicyDocument.Statement[0].Effect).To(Equal("Allow"))
-			Expect(policy.PolicyDocument.Statement[0].Resource).To(Equal("*"))
-			Expect(policy.PolicyDocument.Statement[0].Action).To(Equal([]string{
-				"acm:DescribeCertificate",
-				"acm:ListCertificates",
-				"acm:GetCertificate",
-				"ec2:AuthorizeSecurityGroupIngress",
-				"ec2:CreateSecurityGroup",
-				"ec2:CreateTags",
-				"ec2:DeleteTags",
-				"ec2:DeleteSecurityGroup",
-				"ec2:DescribeAccountAttributes",
-				"ec2:DescribeAddresses",
-				"ec2:DescribeInstances",
-				"ec2:DescribeInstanceStatus",
-				"ec2:DescribeInternetGateways",
-				"ec2:DescribeNetworkInterfaces",
-				"ec2:DescribeSecurityGroups",
-				"ec2:DescribeSubnets",
-				"ec2:DescribeTags",
-				"ec2:DescribeVpcs",
-				"ec2:ModifyInstanceAttribute",
-				"ec2:ModifyNetworkInterfaceAttribute",
-				"ec2:RevokeSecurityGroupIngress",
-				"elasticloadbalancing:AddListenerCertificates",
-				"elasticloadbalancing:AddTags",
-				"elasticloadbalancing:CreateListener",
+			Expect(policy.PolicyDocument.Statement[0].Resource).To(Equal(
+				map[string]interface{}{
+					"Fn::Sub": "arn:${AWS::Partition}:ec2:*:*:security-group/*",
+				},
+			))
+			Expect(policy.PolicyDocument.Statement[0].Action).To(Equal([]string{"ec2:CreateTags"}))
+			Expect(policy.PolicyDocument.Statement[0].Condition).To(HaveLen(2))
+
+			Expect(policy.PolicyDocument.Statement[1].Effect).To(Equal("Allow"))
+			Expect(policy.PolicyDocument.Statement[1].Resource).To(Equal(
+				map[string]interface{}{
+					"Fn::Sub": "arn:${AWS::Partition}:ec2:*:*:security-group/*",
+				},
+			))
+			Expect(policy.PolicyDocument.Statement[1].Action).To(Equal([]string{"ec2:CreateTags", "ec2:DeleteTags"}))
+			Expect(policy.PolicyDocument.Statement[1].Condition).To(HaveLen(1))
+
+			Expect(policy.PolicyDocument.Statement[2].Effect).To(Equal("Allow"))
+			Expect(policy.PolicyDocument.Statement[2].Resource).To(Equal("*"))
+			Expect(policy.PolicyDocument.Statement[2].Action).To(Equal([]string{
 				"elasticloadbalancing:CreateLoadBalancer",
-				"elasticloadbalancing:CreateRule",
 				"elasticloadbalancing:CreateTargetGroup",
-				"elasticloadbalancing:DeleteListener",
-				"elasticloadbalancing:DeleteLoadBalancer",
-				"elasticloadbalancing:DeleteRule",
-				"elasticloadbalancing:DeleteTargetGroup",
-				"elasticloadbalancing:DeregisterTargets",
-				"elasticloadbalancing:DescribeListenerCertificates",
-				"elasticloadbalancing:DescribeListeners",
-				"elasticloadbalancing:DescribeLoadBalancers",
-				"elasticloadbalancing:DescribeLoadBalancerAttributes",
-				"elasticloadbalancing:DescribeRules",
-				"elasticloadbalancing:DescribeSSLPolicies",
-				"elasticloadbalancing:DescribeTags",
-				"elasticloadbalancing:DescribeTargetGroups",
-				"elasticloadbalancing:DescribeTargetGroupAttributes",
-				"elasticloadbalancing:DescribeTargetHealth",
-				"elasticloadbalancing:ModifyListener",
-				"elasticloadbalancing:ModifyLoadBalancerAttributes",
-				"elasticloadbalancing:ModifyRule",
-				"elasticloadbalancing:ModifyTargetGroup",
-				"elasticloadbalancing:ModifyTargetGroupAttributes",
-				"elasticloadbalancing:RegisterTargets",
-				"elasticloadbalancing:RemoveListenerCertificates",
+			}))
+			Expect(policy.PolicyDocument.Statement[2].Condition).To(HaveLen(1))
+
+			Expect(policy.PolicyDocument.Statement[3].Effect).To(Equal("Allow"))
+			Expect(policy.PolicyDocument.Statement[3].Resource).To(Equal([]interface{}{
+				map[string]interface{}{
+					"Fn::Sub": "arn:${AWS::Partition}:elasticloadbalancing:*:*:targetgroup/*/*",
+				},
+				map[string]interface{}{
+					"Fn::Sub": "arn:${AWS::Partition}:elasticloadbalancing:*:*:loadbalancer/net/*/*",
+				},
+				map[string]interface{}{
+					"Fn::Sub": "arn:${AWS::Partition}:elasticloadbalancing:*:*:loadbalancer/app/*/*",
+				},
+			}))
+			Expect(policy.PolicyDocument.Statement[3].Action).To(Equal([]string{
+				"elasticloadbalancing:AddTags",
 				"elasticloadbalancing:RemoveTags",
+			}))
+			Expect(policy.PolicyDocument.Statement[3].Condition).To(HaveLen(1))
+
+			Expect(policy.PolicyDocument.Statement[4].Effect).To(Equal("Allow"))
+			Expect(policy.PolicyDocument.Statement[4].Resource).To(Equal("*"))
+			Expect(policy.PolicyDocument.Statement[4].Action).To(Equal([]string{
+				"ec2:AuthorizeSecurityGroupIngress",
+				"ec2:RevokeSecurityGroupIngress",
+				"ec2:DeleteSecurityGroup",
+				"elasticloadbalancing:ModifyLoadBalancerAttributes",
 				"elasticloadbalancing:SetIpAddressType",
 				"elasticloadbalancing:SetSecurityGroups",
 				"elasticloadbalancing:SetSubnets",
-				"elasticloadbalancing:SetWebACL",
+				"elasticloadbalancing:DeleteLoadBalancer",
+				"elasticloadbalancing:ModifyTargetGroup",
+				"elasticloadbalancing:ModifyTargetGroupAttributes",
+				"elasticloadbalancing:DeleteTargetGroup",
+			}))
+			Expect(policy.PolicyDocument.Statement[4].Condition).To(HaveLen(1))
+
+			Expect(policy.PolicyDocument.Statement[5].Effect).To(Equal("Allow"))
+			Expect(policy.PolicyDocument.Statement[5].Resource).To(Equal(
+				map[string]interface{}{
+					"Fn::Sub": "arn:${AWS::Partition}:elasticloadbalancing:*:*:targetgroup/*/*",
+				},
+			))
+			Expect(policy.PolicyDocument.Statement[5].Action).To(Equal([]string{
+				"elasticloadbalancing:RegisterTargets",
+				"elasticloadbalancing:DeregisterTargets",
+			}))
+			Expect(policy.PolicyDocument.Statement[5].Condition).To(HaveLen(0))
+
+			Expect(policy.PolicyDocument.Statement[6].Effect).To(Equal("Allow"))
+			Expect(policy.PolicyDocument.Statement[6].Resource).To(Equal("*"))
+			Expect(policy.PolicyDocument.Statement[6].Action).To(Equal([]string{
 				"iam:CreateServiceLinkedRole",
-				"iam:GetServerCertificate",
+				"ec2:DescribeAccountAttributes",
+				"ec2:DescribeAddresses",
+				"ec2:DescribeInternetGateways",
+				"ec2:DescribeVpcs",
+				"ec2:DescribeSubnets",
+				"ec2:DescribeSecurityGroups",
+				"ec2:DescribeInstances",
+				"ec2:DescribeNetworkInterfaces",
+				"ec2:DescribeTags",
+				"elasticloadbalancing:DescribeLoadBalancers",
+				"elasticloadbalancing:DescribeLoadBalancerAttributes",
+				"elasticloadbalancing:DescribeListeners",
+				"elasticloadbalancing:DescribeListenerCertificates",
+				"elasticloadbalancing:DescribeSSLPolicies",
+				"elasticloadbalancing:DescribeRules",
+				"elasticloadbalancing:DescribeTargetGroups",
+				"elasticloadbalancing:DescribeTargetGroupAttributes",
+				"elasticloadbalancing:DescribeTargetHealth",
+				"elasticloadbalancing:DescribeTags",
+				"cognito-idp:DescribeUserPoolClient",
+				"acm:ListCertificates",
+				"acm:DescribeCertificate",
 				"iam:ListServerCertificates",
-				"waf-regional:GetWebACLForResource",
+				"iam:GetServerCertificate",
 				"waf-regional:GetWebACL",
+				"waf-regional:GetWebACLForResource",
 				"waf-regional:AssociateWebACL",
 				"waf-regional:DisassociateWebACL",
-				"tag:GetResources",
-				"tag:TagResources",
-				"waf:GetWebACL",
 				"wafv2:GetWebACL",
 				"wafv2:GetWebACLForResource",
 				"wafv2:AssociateWebACL",
 				"wafv2:DisassociateWebACL",
-				"shield:DescribeProtection",
 				"shield:GetSubscriptionState",
-				"shield:DeleteProtection",
+				"shield:DescribeProtection",
 				"shield:CreateProtection",
-				"shield:DescribeSubscription",
-				"shield:ListProtections",
+				"shield:DeleteProtection",
+				"ec2:AuthorizeSecurityGroupIngress",
+				"ec2:RevokeSecurityGroupIngress",
+				"ec2:CreateSecurityGroup",
+				"elasticloadbalancing:CreateListener",
+				"elasticloadbalancing:DeleteListener",
+				"elasticloadbalancing:CreateRule",
+				"elasticloadbalancing:DeleteRule",
+				"elasticloadbalancing:SetWebAcl",
+				"elasticloadbalancing:ModifyListener",
+				"elasticloadbalancing:AddListenerCertificates",
+				"elasticloadbalancing:RemoveListenerCertificates",
+				"elasticloadbalancing:ModifyRule",
 			}))
+			Expect(policy.PolicyDocument.Statement[6].Condition).To(HaveLen(0))
 		})
-
 	})
 
 	Context("NodeGroupXRay", func() {
@@ -1593,6 +1657,29 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Expect(profile.Path).To(Equal("/"))
 			Expect(profile.Roles).To(HaveLen(1))
 			Expect(profile.Roles[0]).To(Equal("arn:role"))
+
+			isFnGetAttOf(getLaunchTemplateData(ngTemplate).IamInstanceProfile.Arn, "NodeInstanceProfile", "Arn")
+		})
+	})
+
+	Context("NodeGroup with custom role containing a deep resource path is normalized", func() {
+		cfg, ng := newClusterConfigAndNodegroup(true)
+
+		ng.IAM.InstanceRoleARN = "arn:aws:iam::1234567890:role/foo/bar/baz/custom-eks-role"
+
+		build(cfg, "eksctl-test-123-cluster", ng)
+
+		roundtrip()
+
+		It("should have correct instance role and profile", func() {
+			Expect(ngTemplate.Resources).ToNot(HaveKey("NodeInstanceRole"))
+			Expect(ngTemplate.Resources).To(HaveKey("NodeInstanceProfile"))
+
+			profile := ngTemplate.Resources["NodeInstanceProfile"].Properties
+
+			Expect(profile.Path).To(Equal("/"))
+			Expect(profile.Roles).To(HaveLen(1))
+			Expect(profile.Roles[0]).To(Equal("custom-eks-role"))
 
 			isFnGetAttOf(getLaunchTemplateData(ngTemplate).IamInstanceProfile.Arn, "NodeInstanceProfile", "Arn")
 		})
@@ -1807,7 +1894,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 			},
 			SecurityGroup: "sg-0b44c48bcba5b7362",
 			Subnets: &api.ClusterSubnets{
-				Public: map[string]api.Network{
+				Public: api.AZSubnetMappingFromMap(map[string]api.AZSubnetSpec{
 					"us-west-2b": {
 						ID: "subnet-0f98135715dfcf55f",
 					},
@@ -1817,8 +1904,8 @@ var _ = Describe("CloudFormation template builder API", func() {
 					"us-west-2c": {
 						ID: "subnet-0e2e63ff1712bf6ef",
 					},
-				},
-				Private: map[string]api.Network{
+				}),
+				Private: api.AZSubnetMappingFromMap(map[string]api.AZSubnetSpec{
 					"us-west-2b": {
 						ID: "subnet-0f98135715dfcf55a",
 					},
@@ -1828,7 +1915,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 					"us-west-2c": {
 						ID: "subnet-0e2e63ff1712bf6ea",
 					},
-				},
+				}),
 			},
 		}
 
@@ -2003,7 +2090,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Expect(ca.Permissions).To(Equal("0644"))
 			Expect(ca.Content).To(Equal(string(caCertData)))
 
-			checkScript(cc, "/var/lib/cloud/scripts/per-instance/bootstrap.al2.sh", true)
+			checkScript(cc, path.Join(scriptPath, "bootstrap.al2.sh"), true)
 		})
 
 	})
@@ -2056,7 +2143,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Expect(ca.Permissions).To(Equal("0644"))
 			Expect(ca.Content).To(Equal(string(caCertData)))
 
-			checkScript(cc, "/var/lib/cloud/scripts/per-instance/bootstrap.al2.sh", true)
+			checkScript(cc, path.Join(scriptPath, "bootstrap.al2.sh"), true)
 
 			Expect(cc.Commands).To(HaveLen(len(ng.PreBootstrapCommands) + 1))
 			for i, cmd := range ng.PreBootstrapCommands {
@@ -2115,7 +2202,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Expect(ca.Permissions).To(Equal("0644"))
 			Expect(ca.Content).To(Equal(string(caCertData)))
 
-			script := getFile(cc, "/var/lib/cloud/scripts/per-instance/bootstrap.al2.sh")
+			script := getFile(cc, path.Join(scriptPath, "bootstrap.al2.sh"))
 			Expect(script).To(BeNil())
 
 			Expect(cc.Commands).To(HaveLen(1))
@@ -2172,7 +2259,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Expect(ca.Permissions).To(Equal("0644"))
 			Expect(ca.Content).To(Equal(string(caCertData)))
 
-			script := getFile(cc, "/var/lib/cloud/scripts/per-instance/bootstrap.al2.sh")
+			script := getFile(cc, path.Join(scriptPath, "bootstrap.al2.sh"))
 			Expect(script).To(BeNil())
 
 			Expect(cc.Commands).To(HaveLen(4))
@@ -2242,7 +2329,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Expect(ca.Permissions).To(Equal("0644"))
 			Expect(ca.Content).To(Equal(string(caCertData)))
 
-			checkScript(cc, "/var/lib/cloud/scripts/per-instance/bootstrap.ubuntu.sh", true)
+			checkScript(cc, path.Join(scriptPath, "bootstrap.ubuntu.sh"), true)
 		})
 	})
 
@@ -2291,7 +2378,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Expect(ca.Permissions).To(Equal("0644"))
 			Expect(ca.Content).To(Equal(string(caCertData)))
 
-			checkScript(cc, "/var/lib/cloud/scripts/per-instance/bootstrap.ubuntu.sh", true)
+			checkScript(cc, path.Join(scriptPath, "bootstrap.ubuntu.sh"), true)
 
 			for i, cmd := range ng.PreBootstrapCommands {
 				c := cc.Commands[i].([]interface{})
@@ -2437,6 +2524,253 @@ var _ = Describe("CloudFormation template builder API", func() {
 		})
 	})
 
+	Context("UserData - Ubuntu2004", func() {
+		cfg, ng := newClusterConfigAndNodegroup(true)
+
+		cfg.VPC.CIDR, _ = ipnet.ParseCIDR("10.1.0.0/16")
+		ng.AMIFamily = "Ubuntu2004"
+		ng.InstanceType = "m5.large"
+
+		build(cfg, "eksctl-test-123-cluster", ng)
+
+		roundtrip()
+
+		extractCloudConfig()
+
+		It("should have correct description", func() {
+			Expect(ngTemplate.Description).To(ContainSubstring("AMI family: Ubuntu2004"))
+			Expect(ngTemplate.Description).To(ContainSubstring("SSH access: false"))
+			Expect(ngTemplate.Description).To(ContainSubstring("private networking: false"))
+		})
+
+		It("should have packages, scripts and commands in cloud-config", func() {
+			Expect(cc.Packages).Should(BeEmpty())
+
+			kubeletEnv := getFile(cc, "/etc/eksctl/kubelet.env")
+			Expect(kubeletEnv).ToNot(BeNil())
+			Expect(kubeletEnv.Permissions).To(Equal("0644"))
+			Expect(strings.Split(kubeletEnv.Content, "\n")).To(Equal([]string{
+				"NODE_LABELS=",
+				"NODE_TAINTS=",
+				"CLUSTER_DNS=172.20.0.10",
+			}))
+
+			kubeconfig := getFile(cc, "/etc/eksctl/kubeconfig.yaml")
+			Expect(kubeconfig).ToNot(BeNil())
+			Expect(kubeconfig.Permissions).To(Equal("0644"))
+			Expect(kubeconfig.Content).To(MatchYAML(kubeconfigBody("heptio-authenticator-aws")))
+
+			kubeletConfigAssetContent, err := nodebootstrap.Asset("kubelet.yaml")
+			Expect(err).ToNot(HaveOccurred())
+			kubeletConfigTemplate := completeKubeletConfig(kubeletConfigAssetContent, "172.20.0.10")
+			kubeletConfigAssetContentString := kubeletConfigTemplate + "resolvConf: /run/systemd/resolve/resolv.conf\n"
+
+			kubeletConfig := getFile(cc, "/etc/eksctl/kubelet.yaml")
+			Expect(kubeletConfig).ToNot(BeNil())
+			Expect(kubeletConfig.Permissions).To(Equal("0644"))
+
+			Expect(kubeletConfig.Content).To(MatchYAML(kubeletConfigAssetContentString))
+
+			ca := getFile(cc, "/etc/eksctl/ca.crt")
+			Expect(ca).ToNot(BeNil())
+			Expect(ca.Permissions).To(Equal("0644"))
+			Expect(ca.Content).To(Equal(string(caCertData)))
+
+			checkScript(cc, path.Join(scriptPath, "bootstrap.ubuntu.sh"), true)
+		})
+	})
+
+	Context("UserData - Ubuntu2004 (custom VPC CIDR and pre-bootstrap script)", func() {
+		cfg, ng := newClusterConfigAndNodegroup(true)
+
+		cfg.VPC.CIDR, _ = ipnet.ParseCIDR("10.1.0.0/16")
+		ng.AMIFamily = "Ubuntu2004"
+		ng.InstanceType = "m5.large"
+
+		ng.PreBootstrapCommands = []string{
+			"while true ; do echo foo > /dev/null ; done",
+		}
+
+		build(cfg, "eksctl-test-123-cluster", ng)
+
+		roundtrip()
+
+		extractCloudConfig()
+
+		It("should have correct description", func() {
+			Expect(ngTemplate.Description).To(ContainSubstring("AMI family: Ubuntu2004"))
+			Expect(ngTemplate.Description).To(ContainSubstring("SSH access: false"))
+			Expect(ngTemplate.Description).To(ContainSubstring("private networking: false"))
+		})
+
+		It("should have packages, scripts and commands in cloud-config", func() {
+			Expect(cc.Packages).Should(BeEmpty())
+
+			kubeletEnv := getFile(cc, "/etc/eksctl/kubelet.env")
+			Expect(kubeletEnv).ToNot(BeNil())
+			Expect(kubeletEnv.Permissions).To(Equal("0644"))
+			Expect(strings.Split(kubeletEnv.Content, "\n")).To(Equal([]string{
+				"NODE_LABELS=",
+				"NODE_TAINTS=",
+				"CLUSTER_DNS=172.20.0.10",
+			}))
+
+			kubeconfig := getFile(cc, "/etc/eksctl/kubeconfig.yaml")
+			Expect(kubeconfig).ToNot(BeNil())
+			Expect(kubeconfig.Permissions).To(Equal("0644"))
+			Expect(kubeconfig.Content).To(MatchYAML(kubeconfigBody("heptio-authenticator-aws")))
+
+			ca := getFile(cc, "/etc/eksctl/ca.crt")
+			Expect(ca).ToNot(BeNil())
+			Expect(ca.Permissions).To(Equal("0644"))
+			Expect(ca.Content).To(Equal(string(caCertData)))
+
+			checkScript(cc, path.Join(scriptPath, "bootstrap.ubuntu.sh"), true)
+
+			for i, cmd := range ng.PreBootstrapCommands {
+				c := cc.Commands[i].([]interface{})
+				Expect(c[0]).To(Equal("/bin/bash"))
+				Expect(c[1]).To(Equal("-c"))
+				Expect(c[2]).To(Equal(cmd))
+			}
+		})
+	})
+
+	Context("UserData - Ubuntu2004 (custom bootstrap)", func() {
+		cfg, ng := newClusterConfigAndNodegroup(true)
+
+		cfg.VPC.CIDR, _ = ipnet.ParseCIDR("10.1.0.0/16")
+		ng.AMIFamily = "Ubuntu2004"
+		ng.InstanceType = "m5.large"
+		ng.MaxPodsPerNode = 66
+
+		ng.Labels = map[string]string{
+			"os": "ubuntu",
+		}
+		ng.Taints = map[string]string{
+			"key1": "value1:NoSchedule",
+		}
+
+		ng.ClusterDNS = "169.254.20.10"
+
+		ng.OverrideBootstrapCommand = &overrideBootstrapCommand
+
+		build(cfg, "eksctl-test-123-cluster", ng)
+
+		roundtrip()
+
+		extractCloudConfig()
+
+		It("should have correct description", func() {
+			Expect(ngTemplate.Description).To(ContainSubstring("AMI family: Ubuntu2004"))
+			Expect(ngTemplate.Description).To(ContainSubstring("SSH access: false"))
+			Expect(ngTemplate.Description).To(ContainSubstring("private networking: false"))
+		})
+
+		It("should have packages, scripts and commands in cloud-config", func() {
+			Expect(cc.Packages).Should(BeEmpty())
+
+			kubeletEnv := getFile(cc, "/etc/eksctl/kubelet.env")
+			Expect(kubeletEnv).ToNot(BeNil())
+			Expect(kubeletEnv.Permissions).To(Equal("0644"))
+			Expect(strings.Split(kubeletEnv.Content, "\n")).To(Equal([]string{
+				"NODE_LABELS=os=ubuntu",
+				"NODE_TAINTS=key1=value1:NoSchedule",
+				"MAX_PODS=66",
+				"CLUSTER_DNS=169.254.20.10",
+			}))
+
+			kubeconfig := getFile(cc, "/etc/eksctl/kubeconfig.yaml")
+			Expect(kubeconfig).ToNot(BeNil())
+			Expect(kubeconfig.Permissions).To(Equal("0644"))
+			Expect(kubeconfig.Content).To(MatchYAML(kubeconfigBody("heptio-authenticator-aws")))
+
+			ca := getFile(cc, "/etc/eksctl/ca.crt")
+			Expect(ca).ToNot(BeNil())
+			Expect(ca.Permissions).To(Equal("0644"))
+			Expect(ca.Content).To(Equal(string(caCertData)))
+
+			script := getFile(cc, "/var/lib/cloud/scripts/per-instance/bootstrap.ubuntu.sh")
+			Expect(script).To(BeNil())
+
+			Expect(cc.Commands).To(HaveLen(1))
+			Expect(cc.Commands[0]).To(HaveLen(3))
+			Expect(cc.Commands[0].([]interface{})[0]).To(Equal("/bin/bash"))
+			Expect(cc.Commands[0].([]interface{})[1]).To(Equal("-c"))
+			Expect(cc.Commands[0].([]interface{})[2]).To(Equal(overrideBootstrapCommand))
+		})
+	})
+
+	Context("UserData - Ubuntu2004 (custom bootstrap and pre-bootstrap)", func() {
+		cfg, ng := newClusterConfigAndNodegroup(true)
+
+		cfg.VPC.CIDR, _ = ipnet.ParseCIDR("10.1.0.0/16")
+		ng.AMIFamily = "Ubuntu2004"
+		ng.InstanceType = "m5.large"
+
+		ng.Labels = map[string]string{
+			"os": "ubuntu",
+		}
+
+		ng.ClusterDNS = "169.254.20.10"
+
+		ng.PreBootstrapCommands = []string{"echo 1 > /tmp/1", "echo 2 > /tmp/2", "echo 3 > /tmp/3"}
+		ng.OverrideBootstrapCommand = &overrideBootstrapCommand
+
+		build(cfg, "eksctl-test-123-cluster", ng)
+
+		roundtrip()
+
+		extractCloudConfig()
+
+		It("should have correct description", func() {
+			Expect(ngTemplate.Description).To(ContainSubstring("AMI family: Ubuntu2004"))
+			Expect(ngTemplate.Description).To(ContainSubstring("SSH access: false"))
+			Expect(ngTemplate.Description).To(ContainSubstring("private networking: false"))
+		})
+
+		It("should have packages, scripts and commands in cloud-config", func() {
+			Expect(cc.Packages).Should(BeEmpty())
+
+			kubeletEnv := getFile(cc, "/etc/eksctl/kubelet.env")
+			Expect(kubeletEnv).ToNot(BeNil())
+			Expect(kubeletEnv.Permissions).To(Equal("0644"))
+			Expect(strings.Split(kubeletEnv.Content, "\n")).To(Equal([]string{
+				"NODE_LABELS=os=ubuntu",
+				"NODE_TAINTS=",
+				"CLUSTER_DNS=169.254.20.10",
+			}))
+
+			kubeconfig := getFile(cc, "/etc/eksctl/kubeconfig.yaml")
+			Expect(kubeconfig).ToNot(BeNil())
+			Expect(kubeconfig.Permissions).To(Equal("0644"))
+			Expect(kubeconfig.Content).To(MatchYAML(kubeconfigBody("heptio-authenticator-aws")))
+
+			ca := getFile(cc, "/etc/eksctl/ca.crt")
+			Expect(ca).ToNot(BeNil())
+			Expect(ca.Permissions).To(Equal("0644"))
+			Expect(ca.Content).To(Equal(string(caCertData)))
+
+			script := getFile(cc, "/var/lib/cloud/scripts/per-instance/bootstrap.ubuntu.sh")
+			Expect(script).To(BeNil())
+
+			Expect(cc.Commands).To(HaveLen(4))
+			Expect(cc.Commands[0]).To(HaveLen(3))
+
+			for i, cmd := range ng.PreBootstrapCommands {
+				c := cc.Commands[i].([]interface{})
+				Expect(c[0]).To(Equal("/bin/bash"))
+				Expect(c[1]).To(Equal("-c"))
+				Expect(c[2]).To(Equal(cmd))
+			}
+
+			c3 := cc.Commands[3].([]interface{})
+			Expect(c3[0]).To(Equal("/bin/bash"))
+			Expect(c3[1]).To(Equal("-c"))
+			Expect(c3[2]).To(Equal(overrideBootstrapCommand))
+		})
+	})
+
 	Context("with Fargate profiles", func() {
 		cfg, ng := newClusterConfigAndNodegroup(true)
 		name := "test-fargate-profile"
@@ -2459,7 +2793,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Expect(clusterTemplate.Resources).To(HaveKey("ServiceRole"))
 			Expect(clusterTemplate.Resources).To(HaveKey("PolicyCloudWatchMetrics"))
 			Expect(clusterTemplate.Resources).To(HaveKey("FargatePodExecutionRole"))
-			Expect(clusterTemplate.Resources).To(HaveLen(4))
+			Expect(clusterTemplate.Resources).To(HaveLen(5))
 		})
 	})
 
@@ -2509,14 +2843,14 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Expect(clusterTemplate.Resources).To(HaveKey("ControlPlane"))
 			Expect(clusterTemplate.Resources).To(HaveKey("ServiceRole"))
 			Expect(clusterTemplate.Resources).To(HaveKey("PolicyCloudWatchMetrics"))
-			Expect(clusterTemplate.Resources).To(HaveLen(3))
+			Expect(clusterTemplate.Resources).To(HaveLen(4))
 		})
 
 		It("should have correct own IAM resources", func() {
 			Expect(clusterTemplate.Resources["ServiceRole"].Properties).ToNot(BeNil())
 
 			Expect(clusterTemplate.Resources["ServiceRole"].Properties.ManagedPolicyArns).To(Equal(
-				makePolicyARNRef("AmazonEKSClusterPolicy")),
+				makePolicyARNRef("AmazonEKSClusterPolicy", "AmazonEKSVPCResourceController")),
 			)
 
 			checkARPD([]string{"EKS", "EKSFargatePods"}, clusterTemplate.Resources["ServiceRole"].Properties.AssumeRolePolicyDocument)
@@ -2591,7 +2925,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 				}
 			}
 
-			Expect(len(clusterTemplate.Resources)).To(Equal(31))
+			Expect(len(clusterTemplate.Resources)).To(Equal(32))
 		})
 
 		It("should use own VPC and subnets", func() {
@@ -2689,7 +3023,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 				}
 			}
 
-			Expect(len(clusterTemplate.Resources)).To(Equal(38))
+			Expect(len(clusterTemplate.Resources)).To(Equal(39))
 		})
 
 		It("should use own VPC and subnets", func() {
@@ -2766,7 +3100,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 				Expect(clusterTemplate.Resources).To(HaveKey("RouteTableAssociationPrivate" + region + zone))
 			}
 
-			Expect(len(clusterTemplate.Resources)).To(Equal(35))
+			Expect(len(clusterTemplate.Resources)).To(Equal(36))
 		})
 
 		It("should route Internet traffic from private subnets through their corresponding NAT gateways", func() {
@@ -2812,7 +3146,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 				Expect(clusterTemplate.Resources).To(HaveKey("RouteTableAssociationPrivate" + region + zone))
 			}
 
-			Expect(len(clusterTemplate.Resources)).To(Equal(31))
+			Expect(len(clusterTemplate.Resources)).To(Equal(32))
 		})
 
 		It("should route Internet traffic from private subnets through the single NAT gateway", func() {
@@ -2855,7 +3189,7 @@ var _ = Describe("CloudFormation template builder API", func() {
 				Expect(clusterTemplate.Resources).To(HaveKey("RouteTableAssociationPrivate" + region + zone))
 			}
 
-			Expect(len(clusterTemplate.Resources)).To(Equal(26))
+			Expect(len(clusterTemplate.Resources)).To(Equal(27))
 
 		})
 
@@ -2986,6 +3320,43 @@ var _ = Describe("CloudFormation template builder API", func() {
 			Expect(getLaunchTemplateData(ngTemplate).CreditSpecification).ToNot(BeNil())
 			Expect(getLaunchTemplateData(ngTemplate).CreditSpecification.CPUCredits).ToNot(BeNil())
 			Expect(getLaunchTemplateData(ngTemplate).CreditSpecification.CPUCredits).To(Equal("unlimited"))
+		})
+	})
+
+	Context("NodeGroup with asgSuspendProcesses", func() {
+		cfg, ng := newClusterConfigAndNodegroup(true)
+
+		ng.ASGSuspendProcesses = []string{"Launch", "InstanceRefresh"}
+		build(cfg, "eksctl-test-asgSuspendProcesses", ng)
+
+		roundtrip()
+
+		It("should have correct resources and attributes", func() {
+			Expect(ngTemplate.Resources).To(HaveKey("NodeGroup"))
+			ngResource := ngTemplate.Resources["NodeGroup"]
+			Expect(ng).ToNot(BeNil())
+			Expect(ngResource.UpdatePolicy).To(HaveKey("AutoScalingRollingUpdate"))
+			Expect(ngResource.UpdatePolicy["AutoScalingRollingUpdate"]).To(
+				HaveKeyWithValue("SuspendProcesses", []interface{}{"Launch", "InstanceRefresh"}),
+			)
+		})
+		Context("empty asgSuspendProcesses", func() {
+			cfg, ng := newClusterConfigAndNodegroup(true)
+
+			ng.ASGSuspendProcesses = []string{}
+			build(cfg, "eksctl-test-asgSuspendProcesses-empty", ng)
+
+			roundtrip()
+
+			It("shouldn't be included in resource", func() {
+				Expect(ngTemplate.Resources).To(HaveKey("NodeGroup"))
+				ngResource := ngTemplate.Resources["NodeGroup"]
+				Expect(ng).ToNot(BeNil())
+				Expect(ngResource.UpdatePolicy).To(HaveKey("AutoScalingRollingUpdate"))
+				Expect(ngResource.UpdatePolicy["AutoScalingRollingUpdate"]).ToNot(
+					HaveKey("SuspendProcesses"),
+				)
+			})
 		})
 	})
 

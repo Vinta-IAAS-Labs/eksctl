@@ -1,9 +1,24 @@
 package v1alpha5
 
 import (
+	"fmt"
+	"strings"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/aws/aws-sdk-go/aws"
 	"github.com/weaveworks/eksctl/pkg/git"
+)
+
+const (
+	IAMPolicyAmazonEKSCNIPolicy = "AmazonEKS_CNI_Policy"
+)
+
+var (
+	AWSNodeMeta = ClusterIAMMeta{
+		Name:      "aws-node",
+		Namespace: "kube-system",
+	}
 )
 
 // SetClusterConfigDefaults will set defaults for a given cluster
@@ -14,6 +29,10 @@ func SetClusterConfigDefaults(cfg *ClusterConfig) {
 
 	if cfg.IAM.WithOIDC == nil {
 		cfg.IAM.WithOIDC = Disabled()
+	}
+
+	if cfg.IAM.VPCResourceControllerPolicy == nil {
+		cfg.IAM.VPCResourceControllerPolicy = Enabled()
 	}
 
 	for _, sa := range cfg.IAM.ServiceAccounts {
@@ -34,8 +53,40 @@ func SetClusterConfigDefaults(cfg *ClusterConfig) {
 	}
 }
 
+// IAMServiceAccountsWithImplicitServiceAccounts adds implicitly created
+// IAM SAs that need to be explicitly deleted.
+func IAMServiceAccountsWithImplicitServiceAccounts(cfg *ClusterConfig) []*ClusterIAMServiceAccount {
+	serviceAccounts := cfg.IAM.ServiceAccounts
+	if IsEnabled(cfg.IAM.WithOIDC) && !vpccniAddonSpecified(cfg) {
+		var found bool
+		for _, sa := range cfg.IAM.ServiceAccounts {
+			found = found || (sa.Name == AWSNodeMeta.Name && sa.Namespace == AWSNodeMeta.Namespace)
+		}
+		if !found {
+			awsNode := ClusterIAMServiceAccount{
+				ClusterIAMMeta: AWSNodeMeta,
+				AttachPolicyARNs: []string{
+					fmt.Sprintf("arn:%s:iam::aws:policy/%s", Partition(cfg.Metadata.Region), IAMPolicyAmazonEKSCNIPolicy),
+				},
+			}
+			serviceAccounts = append(serviceAccounts, &awsNode)
+		}
+	}
+	return serviceAccounts
+}
+
+func vpccniAddonSpecified(cfg *ClusterConfig) bool {
+	for _, a := range cfg.Addons {
+		if strings.ToLower(a.Name) == "vpc-cni" {
+			return true
+		}
+	}
+	return false
+}
+
 // SetNodeGroupDefaults will set defaults for a given nodegroup
 func SetNodeGroupDefaults(ng *NodeGroup, meta *ClusterMeta) {
+	setNodeGroupBaseDefaults(ng.NodeGroupBase, meta)
 	if ng.InstanceType == "" {
 		if HasMixedInstances(ng) {
 			ng.InstanceType = "mixed"
@@ -47,11 +98,8 @@ func SetNodeGroupDefaults(ng *NodeGroup, meta *ClusterMeta) {
 		ng.AMIFamily = DefaultNodeImageFamily
 	}
 
-	if ng.SecurityGroups == nil {
-		ng.SecurityGroups = &NodeGroupSGs{
-			AttachIDs: []string{},
-		}
-	}
+	setVolumeDefaults(ng.NodeGroupBase, nil)
+
 	if ng.SecurityGroups.WithLocal == nil {
 		ng.SecurityGroups.WithLocal = Enabled()
 	}
@@ -59,51 +107,31 @@ func SetNodeGroupDefaults(ng *NodeGroup, meta *ClusterMeta) {
 		ng.SecurityGroups.WithShared = Enabled()
 	}
 
-	if ng.SSH == nil {
-		ng.SSH = &NodeGroupSSH{
-			Allow: Disabled(),
-		}
-	}
-
-	if ng.ScalingConfig == nil {
-		ng.ScalingConfig = &ScalingConfig{}
-	}
-
-	setSSHDefaults(ng.SSH)
-
-	if !IsSetAndNonEmptyString(ng.VolumeType) {
-		ng.VolumeType = &DefaultNodeVolumeType
-	}
-
-	if ng.VolumeSize == nil {
-		ng.VolumeSize = &DefaultNodeVolumeSize
-	}
-
-	if ng.IAM == nil {
-		ng.IAM = &NodeGroupIAM{}
-	}
-
-	setIAMDefaults(ng.IAM)
-
-	if ng.Labels == nil {
-		ng.Labels = make(map[string]string)
-	}
-	setDefaultNodeLabels(ng.Labels, meta.Name, ng.Name)
-
-	switch ng.AMIFamily {
-	case NodeImageFamilyBottlerocket:
+	if ng.AMIFamily == NodeImageFamilyBottlerocket {
 		setBottlerocketNodeGroupDefaults(ng)
 	}
 }
 
 // SetManagedNodeGroupDefaults sets default values for a ManagedNodeGroup
 func SetManagedNodeGroupDefaults(ng *ManagedNodeGroup, meta *ClusterMeta) {
+	setNodeGroupBaseDefaults(ng.NodeGroupBase, meta)
 	if ng.AMIFamily == "" {
 		ng.AMIFamily = NodeImageFamilyAmazonLinux2
 	}
-	if ng.InstanceType == "" {
+	if ng.LaunchTemplate == nil && ng.InstanceType == "" && len(ng.InstanceTypes) == 0 {
 		ng.InstanceType = DefaultNodeType
 	}
+
+	if ng.Tags == nil {
+		ng.Tags = make(map[string]string)
+	}
+	ng.Tags[NodeGroupNameTag] = ng.Name
+	ng.Tags[NodeGroupTypeTag] = string(NodeGroupTypeManaged)
+
+	setVolumeDefaults(ng.NodeGroupBase, ng.LaunchTemplate)
+}
+
+func setNodeGroupBaseDefaults(ng *NodeGroupBase, meta *ClusterMeta) {
 	if ng.ScalingConfig == nil {
 		ng.ScalingConfig = &ScalingConfig{}
 	}
@@ -113,6 +141,10 @@ func SetManagedNodeGroupDefaults(ng *ManagedNodeGroup, meta *ClusterMeta) {
 		}
 	}
 	setSSHDefaults(ng.SSH)
+
+	if ng.SecurityGroups == nil {
+		ng.SecurityGroups = &NodeGroupSGs{}
+	}
 
 	if ng.IAM == nil {
 		ng.IAM = &NodeGroupIAM{}
@@ -124,11 +156,32 @@ func SetManagedNodeGroupDefaults(ng *ManagedNodeGroup, meta *ClusterMeta) {
 	}
 	setDefaultNodeLabels(ng.Labels, meta.Name, ng.Name)
 
-	if ng.Tags == nil {
-		ng.Tags = make(map[string]string)
+	if ng.DisableIMDSv1 == nil {
+		ng.DisableIMDSv1 = Disabled()
 	}
-	ng.Tags[NodeGroupNameTag] = ng.Name
-	ng.Tags[NodeGroupTypeTag] = string(NodeGroupTypeManaged)
+	if ng.DisablePodIMDS == nil {
+		ng.DisablePodIMDS = Disabled()
+	}
+}
+
+func setVolumeDefaults(ng *NodeGroupBase, template *LaunchTemplate) {
+	if ng.VolumeType == nil {
+		ng.VolumeType = &DefaultNodeVolumeType
+	}
+	if ng.VolumeSize == nil && template == nil {
+		ng.VolumeSize = &DefaultNodeVolumeSize
+	}
+	if *ng.VolumeType == NodeVolumeTypeGP3 {
+		if ng.VolumeIOPS == nil {
+			ng.VolumeIOPS = aws.Int(DefaultNodeVolumeGP3IOPS)
+		}
+		if ng.VolumeThroughput == nil {
+			ng.VolumeThroughput = aws.Int(DefaultNodeVolumeThroughput)
+		}
+	}
+	if *ng.VolumeType == NodeVolumeTypeIO1 && ng.VolumeIOPS == nil {
+		ng.VolumeIOPS = aws.Int(DefaultNodeVolumeIO1IOPS)
+	}
 }
 
 func setIAMDefaults(iamConfig *NodeGroupIAM) {
@@ -144,8 +197,8 @@ func setIAMDefaults(iamConfig *NodeGroupIAM) {
 	if iamConfig.WithAddonPolicies.CertManager == nil {
 		iamConfig.WithAddonPolicies.CertManager = Disabled()
 	}
-	if iamConfig.WithAddonPolicies.ALBIngress == nil {
-		iamConfig.WithAddonPolicies.ALBIngress = Disabled()
+	if iamConfig.WithAddonPolicies.AWSLoadBalancerController == nil {
+		iamConfig.WithAddonPolicies.AWSLoadBalancerController = Disabled()
 	}
 	if iamConfig.WithAddonPolicies.XRay == nil {
 		iamConfig.WithAddonPolicies.XRay = Disabled()
@@ -210,9 +263,9 @@ func setBottlerocketNodeGroupDefaults(ng *NodeGroup) {
 
 // DefaultClusterNAT will set the default value for Cluster NAT mode
 func DefaultClusterNAT() *ClusterNAT {
-	single := ClusterSingleNAT
+	def := ClusterNATDefault
 	return &ClusterNAT{
-		Gateway: &single,
+		Gateway: &def,
 	}
 }
 

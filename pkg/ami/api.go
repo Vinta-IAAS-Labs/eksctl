@@ -18,16 +18,25 @@ import (
 const (
 	ImageClassGeneral = iota
 	ImageClassGPU
+	ImageClassARM
+)
+
+const (
+	// used by kubelet
+	bottlerocketDataDisk = "/dev/xvdb"
+	// used by OS
+	bottlerocketOSDisk = "/dev/xvda"
 )
 
 // ImageClasses is a list of image class names
 var ImageClasses = []string{
 	"ImageClassGeneral",
 	"ImageClassGPU",
+	"ImageClassARM",
 }
 
 // Use checks if a given AMI ID is available in AWS EC2 as well as checking and populating RootDevice information
-func Use(ec2api ec2iface.EC2API, ng *api.NodeGroup) error {
+func Use(ec2api ec2iface.EC2API, ng *api.NodeGroupBase) error {
 	input := &ec2.DescribeImagesInput{
 		ImageIds: []*string{&ng.AMI},
 	}
@@ -52,6 +61,10 @@ func Use(ec2api ec2iface.EC2API, ng *api.NodeGroup) error {
 	case "ebs":
 		if !api.IsSetAndNonEmptyString(ng.VolumeName) {
 			ng.VolumeName = image.RootDeviceName
+			if ng.AMIFamily == api.NodeImageFamilyBottlerocket {
+				ng.VolumeName = aws.String(bottlerocketDataDisk)
+				ng.AdditionalEncryptedVolume = bottlerocketOSDisk
+			}
 		}
 		rootDeviceMapping, err := findRootDeviceMapping(image)
 		if err != nil {

@@ -26,6 +26,9 @@ AWS_SERVICES_DOMAIN="$(get_metadata services/domain)"
 
 source /etc/eksctl/kubelet.env # this can override MAX_PODS
 
+
+INSTANCE_LIFECYCLE="$(get_metadata instance-life-cycle)"
+
 cat > /etc/eksctl/kubelet.local.env <<EOF
 NODE_IP=${NODE_IP}
 INSTANCE_ID=${INSTANCE_ID}
@@ -51,8 +54,8 @@ systemctl reset-failed
   flags=(
     "node-ip=${NODE_IP}"
     "max-pods=${MAX_PODS}"
-    "node-labels=${NODE_LABELS},alpha.eksctl.io/instance-id=${INSTANCE_ID}"
-    "pod-infra-container-image=${AWS_EKS_ECR_ACCOUNT}.dkr.ecr.${AWS_DEFAULT_REGION}.${AWS_SERVICES_DOMAIN}/eks/pause-amd64:3.1"
+    "node-labels=${NODE_LABELS},alpha.eksctl.io/instance-id=${INSTANCE_ID},node-lifecycle=${INSTANCE_LIFECYCLE}"
+    "pod-infra-container-image=${AWS_EKS_ECR_ACCOUNT}.dkr.ecr.${AWS_DEFAULT_REGION}.${AWS_SERVICES_DOMAIN}/eks/pause:3.3-eksbuild.1"
     "cloud-provider=aws"
     "cni-bin-dir=/opt/cni/bin"
     "cni-conf-dir=/etc/cni/net.d"

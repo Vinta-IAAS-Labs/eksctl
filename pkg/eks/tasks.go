@@ -1,15 +1,27 @@
 package eks
 
 import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/weaveworks/eksctl/pkg/actions/irsa"
+
 	"github.com/kris-nova/logger"
 	"github.com/pkg/errors"
+	"github.com/weaveworks/eksctl/pkg/cfn/manager"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/weaveworks/eksctl/pkg/addons"
+	"github.com/weaveworks/eksctl/pkg/fargate"
 	iamoidc "github.com/weaveworks/eksctl/pkg/iam/oidc"
 	"github.com/weaveworks/eksctl/pkg/utils"
+	"github.com/weaveworks/eksctl/pkg/utils/tasks"
 
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
-	"github.com/weaveworks/eksctl/pkg/cfn/manager"
 	"github.com/weaveworks/eksctl/pkg/kubernetes"
 )
 
@@ -27,54 +39,149 @@ func (t *clusterConfigTask) Do(errs chan error) error {
 	return err
 }
 
-type vpcControllerTask struct {
-	info            string
-	clusterProvider *ClusterProvider
-	spec            *api.ClusterConfig
+// VPCControllerTask represents a task to install the VPC controller
+type VPCControllerTask struct {
+	Info            string
+	ClusterProvider *ClusterProvider
+	ClusterConfig   *api.ClusterConfig
+	PlanMode        bool
 }
 
-func (v *vpcControllerTask) Describe() string { return v.info }
+// Describe implements Task
+func (v *VPCControllerTask) Describe() string { return v.Info }
 
-func (v *vpcControllerTask) Do(errCh chan error) error {
+// Do implements Task
+func (v *VPCControllerTask) Do(errCh chan error) error {
 	defer close(errCh)
-	rawClient, err := v.clusterProvider.NewRawClient(v.spec)
+	rawClient, err := v.ClusterProvider.NewRawClient(v.ClusterConfig)
 	if err != nil {
 		return err
 	}
-	vpcController := addons.NewVPCController(rawClient, v.spec.Status, v.clusterProvider.Provider.Region(), false)
+	oidc, err := v.ClusterProvider.NewOpenIDConnectManager(v.ClusterConfig)
+	if err != nil {
+		return err
+	}
+
+	stackCollection := manager.NewStackCollection(v.ClusterProvider.Provider, v.ClusterConfig)
+
+	clientSet, err := v.ClusterProvider.NewStdClientSet(v.ClusterConfig)
+	if err != nil {
+		return err
+	}
+	irsaManager := irsa.New(v.ClusterConfig.Metadata.Name, stackCollection, oidc, clientSet)
+	irsa := addons.NewIRSAHelper(oidc, stackCollection, irsaManager, v.ClusterConfig.Metadata.Name)
+
+	// TODO PlanMode doesn't work as intended
+	vpcController := addons.NewVPCController(rawClient, irsa, v.ClusterConfig.Status, v.ClusterProvider.Provider.Region(), v.PlanMode)
 	if err := vpcController.Deploy(); err != nil {
 		return errors.Wrap(err, "error installing VPC controller")
 	}
 	return nil
 }
 
-type neuronDevicePluginTask struct {
+type devicePluginTask struct {
 	info            string
 	clusterProvider *ClusterProvider
 	spec            *api.ClusterConfig
+	mkPlugin        addons.MkDevicePlugin
 }
 
-func (n *neuronDevicePluginTask) Describe() string { return n.info }
+func (n *devicePluginTask) Describe() string { return n.info }
 
-func (n *neuronDevicePluginTask) Do(errCh chan error) error {
+func (n *devicePluginTask) Do(errCh chan error) error {
 	defer close(errCh)
 	rawClient, err := n.clusterProvider.NewRawClient(n.spec)
 	if err != nil {
 		return err
 	}
-	neuronDevicePlugin := addons.NewNeuronDevicePlugin(rawClient, n.clusterProvider.Provider.Region(), false)
+	neuronDevicePlugin := n.mkPlugin(rawClient, n.clusterProvider.Provider.Region(), false)
 	if err := neuronDevicePlugin.Deploy(); err != nil {
 		return errors.Wrap(err, "error installing Neuron device plugin")
 	}
 	return nil
 }
 
+func newNvidiaDevicePluginTask(
+	clusterProvider *ClusterProvider,
+	spec *api.ClusterConfig,
+) tasks.Task {
+	t := devicePluginTask{
+		info:            "install Nvidia device plugin",
+		clusterProvider: clusterProvider,
+		spec:            spec,
+		mkPlugin:        addons.NewNvidiaDevicePlugin,
+	}
+	return &t
+}
+
+func newNeuronDevicePluginTask(
+	clusterProvider *ClusterProvider,
+	spec *api.ClusterConfig,
+) tasks.Task {
+	t := devicePluginTask{
+		info:            "install Neuron device plugin",
+		clusterProvider: clusterProvider,
+		spec:            spec,
+		mkPlugin:        addons.NewNeuronDevicePlugin,
+	}
+	return &t
+}
+
+type restartDaemonsetTask struct {
+	name            string
+	namespace       string
+	clusterProvider *ClusterProvider
+	spec            *api.ClusterConfig
+}
+
+func (t *restartDaemonsetTask) Describe() string {
+	return fmt.Sprintf(`restart daemonset "%s/%s"`, t.namespace, t.name)
+}
+
+func (t *restartDaemonsetTask) Do(errCh chan error) error {
+	defer close(errCh)
+	clientSet, err := t.clusterProvider.NewStdClientSet(t.spec)
+	if err != nil {
+		return err
+	}
+	ds := clientSet.AppsV1().DaemonSets(t.namespace)
+	dep, err := ds.Get(context.TODO(), t.name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if dep.Spec.Template.Annotations == nil {
+		dep.Spec.Template.Annotations = make(map[string]string)
+	}
+	dep.Spec.Template.Annotations["eksctl.io/restartedAt"] = time.Now().Format(time.RFC3339)
+	bytes, err := runtime.Encode(unstructured.UnstructuredJSONScheme, dep)
+	if err != nil {
+		return errors.Wrapf(err, "failed to marshal %q deployment", t.name)
+	}
+	if _, err := ds.Patch(context.TODO(), t.name, types.MergePatchType, bytes, metav1.PatchOptions{}); err != nil {
+		return errors.Wrap(err, "failed to patch deployment")
+	}
+	logger.Info(`daemonset "%s/%s" restarted`, t.namespace, t.name)
+	return nil
+}
+
 // CreateExtraClusterConfigTasks returns all tasks for updating cluster configuration not depending on the control plane availability
-func (c *ClusterProvider) CreateExtraClusterConfigTasks(cfg *api.ClusterConfig, installVPCController bool) *manager.TaskTree {
-	newTasks := &manager.TaskTree{
+func (c *ClusterProvider) CreateExtraClusterConfigTasks(cfg *api.ClusterConfig, installVPCController bool) *tasks.TaskTree {
+	newTasks := &tasks.TaskTree{
 		Parallel:  false,
 		IsSubTask: true,
 	}
+
+	newTasks.Append(&tasks.GenericTask{
+		Description: "wait for control plane to become ready",
+		Doer: func() error {
+			clientSet, err := c.NewStdClientSet(cfg)
+			if err != nil {
+				return errors.Wrap(err, "error creating Clientset")
+			}
+			return c.WaitForControlPlane(cfg.Metadata, clientSet)
+		},
+	})
+
 	if len(cfg.Metadata.Tags) > 0 {
 		newTasks.Append(&clusterConfigTask{
 			info: "tag cluster",
@@ -84,7 +191,7 @@ func (c *ClusterProvider) CreateExtraClusterConfigTasks(cfg *api.ClusterConfig, 
 	}
 	if !cfg.HasClusterCloudWatchLogging() {
 		logger.Info("CloudWatch logging will not be enabled for cluster %q in %q", cfg.Metadata.Name, cfg.Metadata.Region)
-		logger.Info("you can enable it with 'eksctl utils update-cluster-logging --region=%s --cluster=%s'", cfg.Metadata.Region, cfg.Metadata.Name)
+		logger.Info("you can enable it with 'eksctl utils update-cluster-logging --enable-types={SPECIFY-YOUR-LOG-TYPES-HERE (e.g. all)} --region=%s --cluster=%s'", cfg.Metadata.Region, cfg.Metadata.Name)
 
 	} else {
 		newTasks.Append(&clusterConfigTask{
@@ -103,66 +210,63 @@ func (c *ClusterProvider) CreateExtraClusterConfigTasks(cfg *api.ClusterConfig, 
 		})
 	}
 
-	if installVPCController {
-		newTasks.Append(&vpcControllerTask{
-			info:            "install Windows VPC controller",
-			spec:            cfg,
-			clusterProvider: c,
-		})
-	}
-
 	if cfg.IsFargateEnabled() {
+		manager := fargate.NewFromProvider(cfg.Metadata.Name, c.Provider)
 		newTasks.Append(&fargateProfilesTask{
 			info:            "create fargate profiles",
 			spec:            cfg,
 			clusterProvider: c,
+			manager:         &manager,
 		})
 	}
+
+	if api.IsEnabled(cfg.IAM.WithOIDC) {
+		c.appendCreateTasksForIAMServiceAccounts(cfg, newTasks)
+	}
+
+	if installVPCController {
+		newTasks.Append(&VPCControllerTask{
+			Info:            "install Windows VPC controller",
+			ClusterConfig:   cfg,
+			ClusterProvider: c,
+		})
+	}
+
 	return newTasks
 }
 
-// NewTasksRequiringControlPlane returns all tasks for updating cluster configuration depending on the control plane availability
-// or nil if there are no tasks
-func (c *ClusterProvider) NewTasksRequiringControlPlane(cfg *api.ClusterConfig) *manager.TaskTree {
-	tasks := &manager.TaskTree{
-		Parallel:  false,
-		IsSubTask: true,
-	}
-	if api.IsEnabled(cfg.IAM.WithOIDC) {
-		c.appendCreateTasksForIAMServiceAccounts(cfg, tasks)
-	}
-
-	return tasks
-}
-
 // ClusterTasksForNodeGroups returns all tasks dependent on node groups
-func (c *ClusterProvider) ClusterTasksForNodeGroups(cfg *api.ClusterConfig, installNeuronDevicePluginParam bool) *manager.TaskTree {
-	tasks := &manager.TaskTree{
+func (c *ClusterProvider) ClusterTasksForNodeGroups(cfg *api.ClusterConfig, installNeuronDevicePluginParam, installNvidiaDevicePluginParam bool) *tasks.TaskTree {
+	tasks := &tasks.TaskTree{
 		Parallel:  false,
-		IsSubTask: true,
+		IsSubTask: false,
 	}
-	var reallyInstallNeuronDevicePlugin bool
+	var haveNeuronInstanceType bool
 	for _, ng := range cfg.NodeGroups {
-		reallyInstallNeuronDevicePlugin = reallyInstallNeuronDevicePlugin || api.HasInstanceType(ng, utils.IsInferentiaInstanceType)
+		haveNeuronInstanceType = haveNeuronInstanceType || api.HasInstanceType(ng, utils.IsInferentiaInstanceType)
 	}
-	reallyInstallNeuronDevicePlugin = reallyInstallNeuronDevicePlugin && installNeuronDevicePluginParam
-	if reallyInstallNeuronDevicePlugin {
-		tasks.Append(&neuronDevicePluginTask{
-			info:            "install Neuron device plugin",
-			spec:            cfg,
-			clusterProvider: c,
+	var haveNvidiaInstanceType bool
+	for _, ng := range cfg.NodeGroups {
+		haveNvidiaInstanceType = haveNvidiaInstanceType || api.HasInstanceType(ng, func(t string) bool {
+			return utils.IsGPUInstanceType(t) && !utils.IsInferentiaInstanceType(t)
 		})
 	}
+	if haveNeuronInstanceType && installNeuronDevicePluginParam {
+		tasks.Append(newNeuronDevicePluginTask(c, cfg))
+	}
+	if haveNvidiaInstanceType && installNvidiaDevicePluginParam {
+		tasks.Append(newNvidiaDevicePluginTask(c, cfg))
+	}
 	return tasks
 }
 
-func (c *ClusterProvider) appendCreateTasksForIAMServiceAccounts(cfg *api.ClusterConfig, tasks *manager.TaskTree) {
+func (c *ClusterProvider) appendCreateTasksForIAMServiceAccounts(cfg *api.ClusterConfig, tasks *tasks.TaskTree) {
 	// we don't have all the information to construct full iamoidc.OpenIDConnectManager now,
 	// instead we just create a reference that gets updated when first task runs, and gets
 	// used by this would be more elegant if it was all done via CloudFormation and we didn't
 	// have to put wires across all the things like this; this whole function is needed because
 	// we cannot manage certain EKS features with CloudFormation
-	eatlyOIDC := &iamoidc.OpenIDConnectManager{}
+	oidcPlaceholder := &iamoidc.OpenIDConnectManager{}
 	tasks.Append(&clusterConfigTask{
 		info: "associate IAM OIDC provider",
 		spec: cfg,
@@ -177,7 +281,15 @@ func (c *ClusterProvider) appendCreateTasksForIAMServiceAccounts(cfg *api.Cluste
 			if err := oidc.CreateProvider(); err != nil {
 				return err
 			}
-			*eatlyOIDC = *oidc
+			*oidcPlaceholder = *oidc
+			// Make sure control plane is reachable
+			clientSet, err := c.NewStdClientSet(cfg)
+			if err != nil {
+				return errors.Wrap(err, "failed to get ClientSet")
+			}
+			if err := c.WaitForControlPlane(cfg.Metadata, clientSet); err != nil {
+				return errors.Wrap(err, "failed to wait for control plane")
+			}
 			return nil
 		},
 	})
@@ -191,12 +303,22 @@ func (c *ClusterProvider) appendCreateTasksForIAMServiceAccounts(cfg *api.Cluste
 	// as this is non-CloudFormation context, we need to construct a new stackManager,
 	// given a clientSet getter and OpenIDConnectManager reference we can build out
 	// the list of tasks for each of the service accounts that need to be created
-	newTasks := c.NewStackManager(cfg).NewTasksToCreateIAMServiceAccounts(cfg.IAM.ServiceAccounts, eatlyOIDC, clientSet)
+	newTasks := c.NewStackManager(cfg).NewTasksToCreateIAMServiceAccounts(
+		api.IAMServiceAccountsWithImplicitServiceAccounts(cfg),
+		oidcPlaceholder,
+		clientSet,
+	)
 	newTasks.IsSubTask = true
 	tasks.Append(newTasks)
+	tasks.Append(&restartDaemonsetTask{
+		namespace:       "kube-system",
+		name:            "aws-node",
+		clusterProvider: c,
+		spec:            cfg,
+	})
 }
 
-func (c *ClusterProvider) maybeAppendTasksForEndpointAccessUpdates(cfg *api.ClusterConfig, tasks *manager.TaskTree) {
+func (c *ClusterProvider) maybeAppendTasksForEndpointAccessUpdates(cfg *api.ClusterConfig, tasks *tasks.TaskTree) {
 	// if a cluster config doesn't have the default api endpoint access, append a new task
 	// so that we update the cluster with the new access configuration.  This is a
 	// non-CloudFormation context, so we create a task to send it through the EKS API.

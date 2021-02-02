@@ -11,7 +11,9 @@ import (
 	"github.com/weaveworks/eksctl/pkg/utils/kubeconfig"
 )
 
-func makeUbuntu1804Config(spec *api.ClusterConfig, ng *api.NodeGroup) (configFiles, error) {
+const ubuntu2004ResolveConfPath = "/run/systemd/resolve/resolv.conf"
+
+func makeUbuntuConfig(spec *api.ClusterConfig, ng *api.NodeGroup) ([]configFile, error) {
 	clientConfigData, err := makeClientConfigData(spec, kubeconfig.HeptioAuthenticatorAWS)
 	if err != nil {
 		return nil, err
@@ -25,31 +27,64 @@ func makeUbuntu1804Config(spec *api.ClusterConfig, ng *api.NodeGroup) (configFil
 		fmt.Sprintf("CLUSTER_DNS=%s", clusterDNS(spec, ng)),
 	)
 
+	// Set resolvConf for Ubuntu 20.04 only, do not override user set value
+	if ng.AMIFamily == api.NodeImageFamilyUbuntu2004 {
+		if ng.KubeletExtraConfig == nil {
+			ng.KubeletExtraConfig = &api.InlineDocument{}
+		}
+		if _, ok := (*ng.KubeletExtraConfig)["resolvConf"]; !ok {
+			(*ng.KubeletExtraConfig)["resolvConf"] = ubuntu2004ResolveConfPath
+		}
+	}
+
 	kubeletConfigData, err := makeKubeletConfigYAML(spec, ng)
 	if err != nil {
 		return nil, err
 	}
 
-	files := configFiles{
-		configDir: {
-			"metadata.env": {content: strings.Join(makeMetadata(spec), "\n")},
-			"kubelet.env":  {content: strings.Join(kubeletEnvParams, "\n")},
-			"kubelet.yaml": {content: string(kubeletConfigData)},
-			// TODO: https://github.com/weaveworks/eksctl/issues/161
-			"ca.crt":          {content: string(spec.Status.CertificateAuthorityData)},
-			"kubeconfig.yaml": {content: string(clientConfigData)},
-			"max_pods.map":    {content: makeMaxPodsMapping()},
-		},
+	dockerConfigData, err := makeDockerConfigJSON()
+	if err != nil {
+		return nil, err
 	}
+
+	files := []configFile{{
+		dir:      configDir,
+		name:     "metadata.env",
+		contents: strings.Join(makeMetadata(spec), "\n"),
+	}, {
+		dir:      configDir,
+		name:     "kubelet.env",
+		contents: strings.Join(kubeletEnvParams, "\n"),
+	}, {
+		dir:      configDir,
+		name:     "kubelet.yaml",
+		contents: string(kubeletConfigData),
+	}, {
+		dir:      configDir,
+		name:     "ca.crt",
+		contents: string(spec.Status.CertificateAuthorityData),
+	}, {
+		dir:      configDir,
+		name:     "kubeconfig.yaml",
+		contents: string(clientConfigData),
+	}, {
+		dir:      configDir,
+		name:     "max_pods.map",
+		contents: makeMaxPodsMapping(),
+	}, {
+		dir:      dockerConfigDir,
+		name:     "daemon.json",
+		contents: dockerConfigData,
+	}}
 
 	return files, nil
 }
 
-// NewUserDataForUbuntu1804 creates new user data for Ubuntu 18.04 nodes
-func NewUserDataForUbuntu1804(spec *api.ClusterConfig, ng *api.NodeGroup) (string, error) {
+// NewUserDataForUbuntu creates new user data for Ubuntu 18.04 & 20.04 nodes
+func NewUserDataForUbuntu(spec *api.ClusterConfig, ng *api.NodeGroup) (string, error) {
 	config := cloudconfig.New()
 
-	files, err := makeUbuntu1804Config(spec, ng)
+	files, err := makeUbuntuConfig(spec, ng)
 	if err != nil {
 		return "", err
 	}

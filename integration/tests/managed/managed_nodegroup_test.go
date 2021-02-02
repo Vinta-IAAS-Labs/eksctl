@@ -25,6 +25,11 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+const (
+	k8sUpdatePollInterval = "2s"
+	k8sUpdatePollTimeout  = "3m"
+)
+
 var params *tests.Params
 
 func init() {
@@ -38,7 +43,7 @@ func init() {
 	params.Version = supportedVersions[len(supportedVersions)-2]
 }
 
-func TestSuite(t *testing.T) {
+func TestManaged(t *testing.T) {
 	testutils.RegisterAndRun(t)
 }
 
@@ -96,6 +101,18 @@ var _ = Describe("(Integration) Create Managed Nodegroups", func() {
 			It("should return the previously created cluster", func() {
 				cmd := params.EksctlGetCmd.WithArgs("clusters", "--all-regions")
 				Expect(cmd).To(RunSuccessfullyWithOutputString(ContainSubstring(params.ClusterName)))
+			})
+		})
+
+		Context("and checking the nodegroup health", func() {
+			It("should return healthy", func() {
+				cmd := params.EksctlUtilsCmd.WithArgs(
+					"nodegroup-health",
+					"--cluster", params.ClusterName,
+					"--name", initialNodeGroup,
+				)
+
+				Expect(cmd).To(RunSuccessfullyWithOutputString(ContainSubstring("active")))
 			})
 		})
 
@@ -226,7 +243,7 @@ var _ = Describe("(Integration) Create Managed Nodegroups", func() {
 		Context("and upgrading a nodegroup", func() {
 			It("should upgrade to the next Kubernetes version", func() {
 				By("updating the control plane version")
-				cmd := params.EksctlUpdateCmd.
+				cmd := params.EksctlUpgradeCmd.
 					WithArgs(
 						"cluster",
 						"--verbose", "4",
@@ -246,10 +263,11 @@ var _ = Describe("(Integration) Create Managed Nodegroups", func() {
 
 				clientset, err := kubernetes.NewForConfig(config)
 				Expect(err).ToNot(HaveOccurred())
-
-				serverVersion, err := clientset.ServerVersion()
-				Expect(err).ToNot(HaveOccurred())
-				Expect(fmt.Sprintf("%s.%s", serverVersion.Major, strings.TrimSuffix(serverVersion.Minor, "+"))).To(Equal(nextVersion))
+				Eventually(func() string {
+					serverVersion, err := clientset.ServerVersion()
+					Expect(err).ToNot(HaveOccurred())
+					return fmt.Sprintf("%s.%s", serverVersion.Major, strings.TrimSuffix(serverVersion.Minor, "+"))
+				}, k8sUpdatePollTimeout, k8sUpdatePollInterval).Should(Equal(nextVersion))
 
 				By(fmt.Sprintf("upgrading nodegroup %s to Kubernetes version %s", initialNodeGroup, nextVersion))
 				cmd = params.EksctlUpgradeCmd.WithArgs(

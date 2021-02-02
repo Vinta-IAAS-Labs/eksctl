@@ -1,6 +1,7 @@
 package definition
 
 import (
+	"go/parser"
 	"regexp"
 	"strings"
 
@@ -10,32 +11,46 @@ import (
 
 var (
 	regexpDefaults      = regexp.MustCompile("(.*)Defaults to `(.*)`")
+	regexpRequired      = regexp.MustCompile("(?m)^Required$")
+	regexpPlusRequired  = regexp.MustCompile(`(?m)^\+required$`)
 	regexpExample       = regexp.MustCompile("(.*)For example: `(.*)`")
-	typeOverridePattern = regexp.MustCompile("(.*)Schema type is `([a-zA-Z]+)`")
+	typeOverridePattern = regexp.MustCompile("(.*)Schema type is `(.*)`")
+	oneOfEntry          = "`([^`]+)`,?[ \t]*"
+	oneOfEntryPattern   = regexp.MustCompile(oneOfEntry)
+	typeOneOfPattern    = regexp.MustCompile("(.*)Schema type is one of ((?:" + oneOfEntry + ")*)")
 	pTags               = regexp.MustCompile("(<p>)|(</p>)")
 )
 
+type Meta struct {
+	Required bool
+	NoDerive bool
+}
+
 // handleComment interprets as much as it can from the comment and saves this
 // information in the Definition
-func (dg *Generator) handleComment(rawName, comment string, def *Definition) (bool, error) {
+func (dg *Generator) handleComment(rawName, comment string, def *Definition) (Meta, error) {
 	var noDerive bool
+	var required bool
 	_, name := interpretReference(rawName)
 	if dg.Strict && name != "" {
 		if !strings.HasPrefix(comment, name+" ") {
-			return noDerive, errors.Errorf("comment should start with field name on field %s", name)
+			return Meta{}, errors.Errorf("comment should start with field name on field %s", name)
 		}
 	}
 
-	enumInformation, err := interpretEnumComments(dg.Importer, comment)
+	enumInformation, err := handleEnumComments(dg.Importer, def, comment)
 	if err != nil {
-		return noDerive, err
+		return Meta{}, err
 	}
-	var enumComment string
+	var synthesizedComment string
 	if enumInformation != nil {
-		def.Default = enumInformation.Default
-		def.Enum = enumInformation.Enum
 		comment = enumInformation.RemainingComment
-		enumComment = enumInformation.EnumComment
+		synthesizedComment = enumInformation.SynthesizedComment
+	}
+
+	// Extract requiredness
+	if regexpPlusRequired.FindStringSubmatch(comment) != nil || regexpRequired.FindStringSubmatch(comment) != nil {
+		required = true
 	}
 
 	// Remove kubernetes-style annotations from comments
@@ -51,14 +66,40 @@ func (dg *Generator) handleComment(rawName, comment string, def *Definition) (bo
 	// Extract default value
 	if m := regexpDefaults.FindStringSubmatch(description); m != nil {
 		description = strings.TrimSpace(m[1])
-		def.Default = m[2]
+		parsedDefault, err := parserAsValue(m[2])
+		if err != nil {
+			return Meta{}, errors.Wrapf(err, "couldn't parse default value from %v", m[2])
+		}
+		def.Default = parsedDefault
 	}
 
 	// Extract schema type, disabling derivation
 	if m := typeOverridePattern.FindStringSubmatch(description); m != nil {
 		description = strings.TrimSpace(m[1])
 		noDerive = true
-		def.Type = m[2]
+		expr, err := parser.ParseExpr(m[2])
+		if err != nil {
+			return Meta{}, errors.Wrapf(err, "couldn't parse type override %v", m[2])
+		}
+		overrideDef, _ := dg.newPropertyRef("", expr, "", false)
+		*def = *overrideDef
+	} else if m := typeOneOfPattern.FindStringSubmatch(description); m != nil {
+		description = strings.TrimSpace(m[1])
+		n := oneOfEntryPattern.FindAllStringSubmatch(m[2], -1)
+		if n == nil {
+			panic("error matching oneOf comment with regex")
+		}
+		defs := []*Definition{}
+		for _, t := range n {
+			schemaRef := t[1]
+			expr, err := parser.ParseExpr(schemaRef)
+			if err != nil {
+				return Meta{}, errors.Wrapf(err, "couldn't parse `oneOf` type %v", schemaRef)
+			}
+			def, _ := dg.newPropertyRef("", expr, "", false)
+			defs = append(defs, def)
+		}
+		def.OneOf = defs
 	}
 
 	// Extract example
@@ -72,18 +113,18 @@ func (dg *Generator) handleComment(rawName, comment string, def *Definition) (bo
 
 	if dg.Strict && name != "" {
 		if description == "" {
-			return noDerive, errors.Errorf("no description on field %s", name)
+			return Meta{}, errors.Errorf("no description on field %s", name)
 		}
 		if !strings.HasSuffix(description, ".") {
-			return noDerive, errors.Errorf("description should end with a dot on field %s", name)
+			return Meta{}, errors.Errorf("description should end with a dot on field %s", name)
 		}
 	}
-	def.Description = joinIfNotEmpty(" ", description, enumComment)
+	def.Description = joinIfNotEmpty(" ", description, synthesizedComment)
 
 	// Convert to HTML
 	html := string(blackfriday.Run([]byte(def.Description), blackfriday.WithNoExtensions()))
 	def.HTMLDescription = strings.TrimSpace(pTags.ReplaceAllString(html, ""))
-	return noDerive, nil
+	return Meta{NoDerive: noDerive, Required: required}, nil
 }
 
 func removeTypeNameFromComment(name, description string) string {

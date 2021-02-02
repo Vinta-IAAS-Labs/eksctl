@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/pkg/errors"
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/util/sets"
 
@@ -155,6 +156,8 @@ func NewCreateClusterLoader(cmd *Cmd, ngFilter *filter.NodeGroupFilter, ng *api.
 		"zones",
 		"managed",
 		"fargate",
+		"spot",
+		"instance-types",
 		"nodes",
 		"nodes-min",
 		"nodes-max",
@@ -166,6 +169,7 @@ func NewCreateClusterLoader(cmd *Cmd, ngFilter *filter.NodeGroupFilter, ng *api.
 		"node-ami-family",
 		"ssh-access",
 		"ssh-public-key",
+		"enable-ssm",
 		"node-private-networking",
 		"node-security-groups",
 		"node-labels",
@@ -244,19 +248,15 @@ func NewCreateClusterLoader(cmd *Cmd, ngFilter *filter.NodeGroupFilter, ng *api.
 			return fmt.Errorf("status fields are read-only")
 		}
 
-		if params.Managed {
-			for _, f := range incompatibleManagedNodesFlags() {
-				if flag := l.CobraCommand.Flag(f); flag != nil && flag.Changed {
-					return ErrUnsupportedManagedFlag(fmt.Sprintf("--%s", f))
-				}
-			}
+		if err := validateManagedNGFlags(l.CobraCommand, params.Managed); err != nil {
+			return err
 		}
 
 		// prevent creation of invalid config object with irrelevant nodegroup
 		// that may or may not be constructed correctly
 		if !params.WithoutNodeGroup {
 			if params.Managed {
-				l.ClusterConfig.ManagedNodeGroups = []*api.ManagedNodeGroup{makeManagedNodegroup(ng)}
+				l.ClusterConfig.ManagedNodeGroups = []*api.ManagedNodeGroup{makeManagedNodegroup(ng, params.CreateManagedNGOptions)}
 			} else {
 				l.ClusterConfig.NodeGroups = []*api.NodeGroup{ng}
 			}
@@ -289,7 +289,7 @@ func NewCreateClusterLoader(cmd *Cmd, ngFilter *filter.NodeGroupFilter, ng *api.
 }
 
 // NewCreateNodeGroupLoader will load config or use flags for 'eksctl create nodegroup'
-func NewCreateNodeGroupLoader(cmd *Cmd, ng *api.NodeGroup, ngFilter *filter.NodeGroupFilter, managedNodeGroup bool) ClusterConfigLoader {
+func NewCreateNodeGroupLoader(cmd *Cmd, ng *api.NodeGroup, ngFilter *filter.NodeGroupFilter, mngOptions CreateManagedNGOptions) ClusterConfigLoader {
 	l := newCommonClusterConfigLoader(cmd)
 
 	l.flagsIncompatibleWithConfigFile.Insert(
@@ -303,8 +303,11 @@ func NewCreateNodeGroupLoader(cmd *Cmd, ng *api.NodeGroup, ngFilter *filter.Node
 		"max-pods-per-node",
 		"node-ami",
 		"node-ami-family",
+		"spot",
+		"instance-types",
 		"ssh-access",
 		"ssh-public-key",
+		"enable-ssm",
 		"node-private-networking",
 		"node-security-groups",
 		"node-labels",
@@ -322,19 +325,18 @@ func NewCreateNodeGroupLoader(cmd *Cmd, ng *api.NodeGroup, ngFilter *filter.Node
 		if l.ClusterConfig.Metadata.Name == "" {
 			return ErrMustBeSet(ClusterNameFlag(cmd))
 		}
-		if managedNodeGroup {
-			for _, f := range incompatibleManagedNodesFlags() {
-				if flag := l.CobraCommand.Flag(f); flag != nil && flag.Changed {
-					return ErrUnsupportedManagedFlag(fmt.Sprintf("--%s", f))
-				}
-			}
-			l.ClusterConfig.ManagedNodeGroups = []*api.ManagedNodeGroup{makeManagedNodegroup(ng)}
+		if err := validateManagedNGFlags(l.CobraCommand, mngOptions.Managed); err != nil {
+			return err
+		}
+		if mngOptions.Managed {
+			l.ClusterConfig.ManagedNodeGroups = []*api.ManagedNodeGroup{makeManagedNodegroup(ng, mngOptions)}
+
 		} else {
 			l.ClusterConfig.NodeGroups = []*api.NodeGroup{ng}
 		}
 
 		// Validate both filtered and unfiltered nodegroups
-		if managedNodeGroup {
+		if mngOptions.Managed {
 			for _, ng := range l.ClusterConfig.ManagedNodeGroups {
 				ngName := names.ForNodeGroup(ng.Name, l.NameArg)
 				if ngName == "" {
@@ -361,11 +363,36 @@ func NewCreateNodeGroupLoader(cmd *Cmd, ng *api.NodeGroup, ngFilter *filter.Node
 	return l
 }
 
-func makeManagedNodegroup(nodeGroup *api.NodeGroup) *api.ManagedNodeGroup {
+func makeManagedNodegroup(nodeGroup *api.NodeGroup, options CreateManagedNGOptions) *api.ManagedNodeGroup {
 	ngBase := *nodeGroup.NodeGroupBase
+	if ngBase.SecurityGroups != nil {
+		ngBase.SecurityGroups = &api.NodeGroupSGs{
+			AttachIDs: ngBase.SecurityGroups.AttachIDs,
+		}
+	}
 	return &api.ManagedNodeGroup{
 		NodeGroupBase: &ngBase,
+		Spot:          options.Spot,
+		InstanceTypes: options.InstanceTypes,
 	}
+}
+
+func validateManagedNGFlags(cmd *cobra.Command, managed bool) error {
+	if managed {
+		for _, f := range incompatibleManagedNodesFlags() {
+			if flag := cmd.Flag(f); flag != nil && flag.Changed {
+				return ErrUnsupportedManagedFlag(fmt.Sprintf("--%s", f))
+			}
+		}
+		return nil
+	}
+	flagsValidOnlyWithMNG := []string{"spot", "instance-types"}
+	for _, f := range flagsValidOnlyWithMNG {
+		if flag := cmd.Flag(f); flag != nil && flag.Changed {
+			return errors.Errorf("--%s is only valid with managed nodegroups (--managed)", f)
+		}
+	}
+	return nil
 }
 
 func normalizeNodeGroup(ng *api.NodeGroup, l *commonClusterConfigLoader) error {
@@ -373,7 +400,9 @@ func normalizeNodeGroup(ng *api.NodeGroup, l *commonClusterConfigLoader) error {
 		if *ng.SSH.PublicKeyPath == "" {
 			return fmt.Errorf("--ssh-public-key must be non-empty string")
 		}
-		ng.SSH.Allow = api.Enabled()
+		if flag := l.CobraCommand.Flag("ssh-access"); flag == nil || !flag.Changed {
+			ng.SSH.Allow = api.Enabled()
+		}
 	} else {
 		ng.SSH.PublicKeyPath = nil
 	}
@@ -514,7 +543,7 @@ func NewUtilsPublicAccessCIDRsLoader(cmd *Cmd) ClusterConfigLoader {
 			return errors.New("a comma-separated CIDR list is required")
 		}
 
-		cidrs, err := parseCIDRs(cmd.NameArg)
+		cidrs, err := parseList(cmd.NameArg)
 		if err != nil {
 			return err
 		}
@@ -524,13 +553,13 @@ func NewUtilsPublicAccessCIDRsLoader(cmd *Cmd) ClusterConfigLoader {
 	return l
 }
 
-func parseCIDRs(arg string) ([]string, error) {
+func parseList(arg string) ([]string, error) {
 	reader := strings.NewReader(arg)
 	csvReader := csv.NewReader(reader)
 	return csvReader.Read()
 }
 
-// NewCreateIAMServiceAccountLoader will laod config or use flags for 'eksctl create iamserviceaccount'
+// NewCreateIAMServiceAccountLoader will load config or use flags for 'eksctl create iamserviceaccount'
 func NewCreateIAMServiceAccountLoader(cmd *Cmd, saFilter *filter.IAMServiceAccountFilter) ClusterConfigLoader {
 	l := newCommonClusterConfigLoader(cmd)
 
@@ -539,6 +568,9 @@ func NewCreateIAMServiceAccountLoader(cmd *Cmd, saFilter *filter.IAMServiceAccou
 	)
 
 	l.validateWithConfigFile = func() error {
+		if l.ClusterConfig.IAM == nil || l.ClusterConfig.IAM.ServiceAccounts == nil {
+			return fmt.Errorf("'iam.serviceAccounts' is not defined in %q", l.ClusterConfigFile)
+		}
 		return saFilter.AppendGlobs(l.Include, l.Exclude, l.ClusterConfig.IAM.ServiceAccounts)
 	}
 
@@ -576,7 +608,7 @@ func NewCreateIAMServiceAccountLoader(cmd *Cmd, saFilter *filter.IAMServiceAccou
 }
 
 // NewGetIAMServiceAccountLoader will load config or use flags for 'eksctl get iamserviceaccount'
-func NewGetIAMServiceAccountLoader(cmd *Cmd, sa *api.ClusterIAMServiceAccount) ClusterConfigLoader {
+func NewGetIAMServiceAccountLoader(cmd *Cmd) ClusterConfigLoader {
 	l := newCommonClusterConfigLoader(cmd)
 
 	l.validateWithConfigFile = func() error {
@@ -587,18 +619,8 @@ func NewGetIAMServiceAccountLoader(cmd *Cmd, sa *api.ClusterIAMServiceAccount) C
 	}
 
 	l.validateWithoutConfigFile = func() error {
-		sa.AttachPolicyARNs = []string{""} // force to pass general validation
-
 		if l.ClusterConfig.Metadata.Name == "" {
 			return ErrMustBeSet(ClusterNameFlag(cmd))
-		}
-
-		if l.NameArg != "" {
-			sa.Name = l.NameArg
-		}
-
-		if sa.Name == "" {
-			l.ClusterConfig.IAM.ServiceAccounts = nil
 		}
 
 		l.Plan = false
@@ -614,7 +636,7 @@ func NewDeleteIAMServiceAccountLoader(cmd *Cmd, sa *api.ClusterIAMServiceAccount
 	l := newCommonClusterConfigLoader(cmd)
 
 	l.validateWithConfigFile = func() error {
-		if api.IsDisabled(l.ClusterConfig.IAM.WithOIDC) {
+		if l.ClusterConfig.IAM == nil || api.IsDisabled(l.ClusterConfig.IAM.WithOIDC) {
 			return fmt.Errorf("'iam.withOIDC' is not enabled in %q", l.ClusterConfigFile)
 		}
 		return saFilter.AppendGlobs(l.Include, l.Exclude, l.ClusterConfig.IAM.ServiceAccounts)

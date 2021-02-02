@@ -6,16 +6,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	cfn "github.com/aws/aws-sdk-go/service/cloudformation"
+	"github.com/aws/aws-sdk-go/service/eks"
+	"github.com/blang/semver"
 	"github.com/kris-nova/logger"
 	"github.com/pkg/errors"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
-	cfn "github.com/aws/aws-sdk-go/service/cloudformation"
-
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 	"github.com/weaveworks/eksctl/pkg/cfn/builder"
 	"github.com/weaveworks/eksctl/pkg/cfn/outputs"
+	"github.com/weaveworks/eksctl/pkg/version"
 )
 
 const (
@@ -24,16 +27,18 @@ const (
 
 // NodeGroupSummary represents a summary of a nodegroup stack
 type NodeGroupSummary struct {
-	StackName           string
-	Cluster             string
-	Name                string
-	MaxSize             int
-	MinSize             int
-	DesiredCapacity     int
-	InstanceType        string
-	ImageID             string
-	CreationTime        *time.Time
-	NodeInstanceRoleARN string
+	StackName            string
+	Cluster              string
+	Name                 string
+	Status               string
+	MaxSize              int
+	MinSize              int
+	DesiredCapacity      int
+	InstanceType         string
+	ImageID              string
+	CreationTime         *time.Time
+	NodeInstanceRoleARN  string
+	AutoScalingGroupName string
 }
 
 // NodeGroupStack represents a nodegroup and its type
@@ -48,10 +53,10 @@ func (c *StackCollection) makeNodeGroupStackName(name string) string {
 }
 
 // createNodeGroupTask creates the nodegroup
-func (c *StackCollection) createNodeGroupTask(errs chan error, ng *api.NodeGroup, supportsManagedNodes bool) error {
+func (c *StackCollection) createNodeGroupTask(errs chan error, ng *api.NodeGroup, supportsManagedNodes, forceAddCNIPolicy bool) error {
 	name := c.makeNodeGroupStackName(ng.Name)
 	logger.Info("building nodegroup stack %q", name)
-	stack := builder.NewNodeGroupResourceSet(c.provider, c.spec, c.makeClusterStackName(), ng, supportsManagedNodes)
+	stack := builder.NewNodeGroupResourceSet(c.provider, c.spec, c.makeClusterStackName(), ng, supportsManagedNodes, forceAddCNIPolicy)
 	if err := stack.AddAllResources(); err != nil {
 		return err
 	}
@@ -66,10 +71,10 @@ func (c *StackCollection) createNodeGroupTask(errs chan error, ng *api.NodeGroup
 	return c.CreateStack(name, stack, ng.Tags, nil, errs)
 }
 
-func (c *StackCollection) createManagedNodeGroupTask(errorCh chan error, ng *api.ManagedNodeGroup) error {
+func (c *StackCollection) createManagedNodeGroupTask(errorCh chan error, ng *api.ManagedNodeGroup, forceAddCNIPolicy bool) error {
 	name := c.makeNodeGroupStackName(ng.Name)
 	logger.Info("building managed nodegroup stack %q", name)
-	stack := builder.NewManagedNodeGroup(c.spec, ng, c.makeClusterStackName())
+	stack := builder.NewManagedNodeGroup(c.spec, ng, builder.NewLaunchTemplateFetcher(c.provider.EC2()), c.makeClusterStackName(), forceAddCNIPolicy)
 	if err := stack.AddAllResources(); err != nil {
 		return err
 	}
@@ -81,6 +86,10 @@ func (c *StackCollection) DescribeNodeGroupStacks() ([]*Stack, error) {
 	stacks, err := c.DescribeStacks()
 	if err != nil {
 		return nil, err
+	}
+
+	if len(stacks) == 0 {
+		return nil, nil
 	}
 
 	nodeGroupStacks := []*Stack{}
@@ -153,7 +162,6 @@ func (c *StackCollection) ScaleNodeGroup(ng *api.NodeGroup) error {
 	clusterName := c.makeClusterStackName()
 	c.spec.Status = &api.ClusterStatus{StackName: clusterName}
 	name := c.makeNodeGroupStackName(ng.Name)
-	logger.Info("scaling nodegroup stack %q in cluster %s", name, clusterName)
 
 	stack, err := c.DescribeStack(&Stack{StackName: &name})
 	if err != nil {
@@ -246,7 +254,8 @@ func (c *StackCollection) GetNodeGroupSummaries(name string) ([]*NodeGroupSummar
 		return nil, errors.Wrap(err, "getting nodegroup stacks")
 	}
 
-	var summaries []*NodeGroupSummary
+	// Create an empty array here so that an object is returned rather than null
+	summaries := []*NodeGroupSummary{}
 	for _, s := range stacks {
 		ngPaths, err := getNodeGroupPaths(s.Tags)
 		if err != nil {
@@ -254,9 +263,17 @@ func (c *StackCollection) GetNodeGroupSummaries(name string) ([]*NodeGroupSummar
 		}
 
 		summary, err := c.mapStackToNodeGroupSummary(s, ngPaths)
+
 		if err != nil {
 			return nil, errors.Wrap(err, "mapping stack to nodegroup summary")
 		}
+
+		asgName, err := c.getAutoScalingGroupName(s)
+		if err != nil {
+			return nil, errors.Wrap(err, "getting autoscalinggroupname")
+		}
+
+		summary.AutoScalingGroupName = asgName
 
 		if name == "" {
 			summaries = append(summaries, summary)
@@ -268,10 +285,80 @@ func (c *StackCollection) GetNodeGroupSummaries(name string) ([]*NodeGroupSummar
 	return summaries, nil
 }
 
+func (c *StackCollection) getAutoScalingGroupName(s *Stack) (string, error) {
+
+	nodeGroupType, err := GetNodeGroupType(s.Tags)
+	if err != nil {
+		return "", err
+	}
+
+	switch nodeGroupType {
+	case api.NodeGroupTypeManaged:
+		res, err := c.GetManagedNodeGroupAutoScalingGroupName(s)
+		if err != nil {
+			return "", err
+		}
+		return res, nil
+	case api.NodeGroupTypeUnmanaged, "":
+		res, err := c.GetNodeGroupAutoScalingGroupName(s)
+		if err != nil {
+			return "", err
+		}
+		return res, nil
+
+	default:
+		return "", fmt.Errorf("cant get autoscaling group name, because unexpected nodegroup type : %q", nodeGroupType)
+	}
+}
+
+// GetNodeGroupAutoScalingGroupName return the unmanaged nodegroup's AutoScalingGroupName
+func (c *StackCollection) GetNodeGroupAutoScalingGroupName(s *Stack) (string, error) {
+	input := &cfn.DescribeStackResourceInput{
+		StackName:         s.StackName,
+		LogicalResourceId: aws.String("NodeGroup"),
+	}
+
+	res, err := c.provider.CloudFormation().DescribeStackResource(input)
+	if err != nil {
+		return "", err
+	}
+
+	return *res.StackResourceDetail.PhysicalResourceId, nil
+}
+
+// GetManagedNodeGroupAutoScalingGroupName returns the managed nodegroup's AutoScalingGroupName
+func (c *StackCollection) GetManagedNodeGroupAutoScalingGroupName(s *Stack) (string, error) {
+	input := &eks.DescribeNodegroupInput{
+		ClusterName:   aws.String(getClusterNameTag(s)),
+		NodegroupName: aws.String(c.GetNodeGroupName(s)),
+	}
+
+	res, err := c.provider.EKS().DescribeNodegroup(input)
+	if err != nil {
+		logger.Warning("couldn't get managed nodegroup details for stack %q", *s.StackName)
+		return "", nil
+	}
+
+	asgs := []string{}
+
+	if res.Nodegroup.Resources != nil {
+		for _, v := range res.Nodegroup.Resources.AutoScalingGroups {
+			asgs = append(asgs, aws.StringValue(v.Name))
+		}
+	}
+	return strings.Join(asgs, ","), nil
+
+}
+
+// DescribeNodeGroupStack gets the specified nodegroup stack
+func (c *StackCollection) DescribeNodeGroupStack(nodeGroupName string) (*Stack, error) {
+	stackName := c.makeNodeGroupStackName(nodeGroupName)
+	return c.DescribeStack(&Stack{StackName: &stackName})
+}
+
 // GetNodeGroupStackType returns the nodegroup stack type
 func (c *StackCollection) GetNodeGroupStackType(name string) (api.NodeGroupType, error) {
-	stackName := c.makeNodeGroupStackName(name)
-	stack, err := c.DescribeStack(&Stack{StackName: &stackName})
+	stack, err := c.DescribeNodeGroupStack(name)
 	if err != nil {
 		return "", err
 	}
@@ -280,9 +367,8 @@ func (c *StackCollection) GetNodeGroupStackType(name string) (api.NodeGroupType,
 
 // GetNodeGroupType returns the nodegroup type
 func GetNodeGroupType(tags []*cfn.Tag) (api.NodeGroupType, error) {
-	var (
-		nodeGroupType api.NodeGroupType
-	)
+	var nodeGroupType api.NodeGroupType
+
 	if ngNameTagValue := GetNodegroupTagName(tags); ngNameTagValue == "" {
 		return "", errors.New("failed to find the nodegroup name tag")
 	}
@@ -299,6 +385,20 @@ func GetNodeGroupType(tags []*cfn.Tag) (api.NodeGroupType, error) {
 	}
 
 	return nodeGroupType, nil
+}
+
+// GetEksctlVersionFromTags returns the eksctl version used to create or update the stack
+func GetEksctlVersionFromTags(tags []*cfn.Tag) (semver.Version, bool, error) {
+	for _, tag := range tags {
+		if *tag.Key == api.EksctlVersionTag {
+			v, err := version.ParseEksctlVersion(*tag.Value)
+			if err != nil {
+				return v, false, errors.Wrapf(err, "unexpected error parsing eksctl version %q", *tag.Value)
+			}
+			return v, true, nil
+		}
+	}
+	return semver.Version{}, false, nil
 }
 
 type nodeGroupPaths struct {
@@ -354,13 +454,18 @@ func (c *StackCollection) mapStackToNodeGroupSummary(stack *Stack, ngPaths *node
 		return nil, errors.Wrapf(err, "error getting CloudFormation template for stack %s", *stack.StackName)
 	}
 
-	cluster := getClusterNameTag(stack)
-	name := c.GetNodeGroupName(stack)
-	maxSize := gjson.Get(template, ngPaths.MaxSize)
-	minSize := gjson.Get(template, ngPaths.MinSize)
-	desired := gjson.Get(template, ngPaths.DesiredCapacity)
-	instanceType := gjson.Get(template, ngPaths.InstanceType)
-	imageID := gjson.Get(template, imageIDPath)
+	summary := &NodeGroupSummary{
+		StackName:       *stack.StackName,
+		Cluster:         getClusterNameTag(stack),
+		Name:            c.GetNodeGroupName(stack),
+		Status:          *stack.StackStatus,
+		MaxSize:         int(gjson.Get(template, ngPaths.MaxSize).Int()),
+		MinSize:         int(gjson.Get(template, ngPaths.MinSize).Int()),
+		DesiredCapacity: int(gjson.Get(template, ngPaths.DesiredCapacity).Int()),
+		InstanceType:    gjson.Get(template, ngPaths.InstanceType).String(),
+		ImageID:         gjson.Get(template, imageIDPath).String(),
+		CreationTime:    stack.CreationTime,
+	}
 
 	nodeGroupType, err := GetNodeGroupType(stack.Tags)
 	if err != nil {
@@ -378,22 +483,11 @@ func (c *StackCollection) mapStackToNodeGroupSummary(stack *Stack, ngPaths *node
 		}
 		collectorSet := outputs.NewCollectorSet(collectors)
 		if err := collectorSet.MustCollect(*stack); err != nil {
-			return nil, errors.Wrapf(err, "error collecting Cloudformation outputs for stack %s", *stack.StackName)
+			logger.Warning(errors.Wrapf(err, "error collecting Cloudformation outputs for stack %s", *stack.StackName).Error())
 		}
 	}
 
-	summary := &NodeGroupSummary{
-		StackName:           *stack.StackName,
-		Cluster:             cluster,
-		Name:                name,
-		MaxSize:             int(maxSize.Int()),
-		MinSize:             int(minSize.Int()),
-		DesiredCapacity:     int(desired.Int()),
-		InstanceType:        instanceType.String(),
-		ImageID:             imageID.String(),
-		CreationTime:        stack.CreationTime,
-		NodeInstanceRoleARN: nodeInstanceRoleARN,
-	}
+	summary.NodeInstanceRoleARN = nodeInstanceRoleARN
 
 	return summary, nil
 }

@@ -2,6 +2,7 @@ package nodebootstrap
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 
@@ -21,14 +22,15 @@ import (
 const (
 	configDir            = "/etc/eksctl/"
 	kubeletDropInUnitDir = "/etc/systemd/system/kubelet.service.d/"
+	dockerConfigDir      = "/etc/docker/"
 )
 
 type configFile struct {
-	content string
-	isAsset bool
+	dir      string
+	name     string
+	contents string
+	isAsset  bool
 }
-
-type configFiles = map[string]map[string]configFile
 
 func getAsset(name string) (string, error) {
 	data, err := Asset(name)
@@ -38,24 +40,25 @@ func getAsset(name string) (string, error) {
 	return string(data), nil
 }
 
-func addFilesAndScripts(config *cloudconfig.CloudConfig, files configFiles, scripts []string) error {
-	for dir, fileNames := range files {
-		for fileName, file := range fileNames {
-			f := cloudconfig.File{
-				Path: dir + fileName,
-			}
-			if file.isAsset {
-				data, err := getAsset(fileName)
-				if err != nil {
-					return err
-				}
-				f.Content = data
-			} else {
-				f.Content = file.content
-			}
-			config.AddFile(f)
+func addFilesAndScripts(config *cloudconfig.CloudConfig, files []configFile, scripts []string) error {
+	for _, file := range files {
+		f := cloudconfig.File{
+			Path: file.dir + file.name,
 		}
+
+		if file.isAsset {
+			data, err := getAsset(file.name)
+			if err != nil {
+				return err
+			}
+			f.Content = data
+		} else {
+			f.Content = file.contents
+		}
+
+		config.AddFile(f)
 	}
+
 	for _, scriptName := range scripts {
 		data, err := getAsset(scriptName)
 		if err != nil {
@@ -83,6 +86,17 @@ func clusterDNS(spec *api.ClusterConfig, ng *api.NodeGroup) string {
 	if ng.ClusterDNS != "" {
 		return ng.ClusterDNS
 	}
+	if spec.KubernetesNetworkConfig != nil && spec.KubernetesNetworkConfig.ServiceIPv4CIDR != "" {
+		if _, ipnet, err := net.ParseCIDR(spec.KubernetesNetworkConfig.ServiceIPv4CIDR); err != nil {
+			panic(errors.Wrap(err, "invalid IPv4 CIDR for kubernetesNetworkConfig.serviceIPv4CIDR"))
+		} else {
+			prefix := strings.Split(ipnet.IP.String(), ".")
+			if len(prefix) != 4 {
+				panic(errors.Wrap(err, "invalid IPv4 CIDR for kubernetesNetworkConfig.serviceIPv4CIDR"))
+			}
+			return strings.Join([]string{prefix[0], prefix[1], prefix[2], "10"}, ".")
+		}
+	}
 	// Default service network is 10.100.0.0, but it gets set 172.20.0.0 automatically when pod network
 	// is anywhere within 10.0.0.0/8
 	if spec.VPC.CIDR != nil && spec.VPC.CIDR.IP[0] == 10 {
@@ -97,6 +111,10 @@ func getKubeReserved(info InstanceTypeInfo) api.InlineDocument {
 		"cpu":               info.DefaultCPUToReserve(),
 		"memory":            info.DefaultMemoryToReserve(),
 	}
+}
+
+func makeDockerConfigJSON() (string, error) {
+	return AssetString("docker-daemon.json")
 }
 
 func makeKubeletConfigYAML(spec *api.ClusterConfig, ng *api.NodeGroup) ([]byte, error) {
@@ -219,8 +237,8 @@ func NewUserData(spec *api.ClusterConfig, ng *api.NodeGroup) (string, error) {
 	switch ng.AMIFamily {
 	case api.NodeImageFamilyAmazonLinux2:
 		return NewUserDataForAmazonLinux2(spec, ng)
-	case api.NodeImageFamilyUbuntu1804:
-		return NewUserDataForUbuntu1804(spec, ng)
+	case api.NodeImageFamilyUbuntu2004, api.NodeImageFamilyUbuntu1804:
+		return NewUserDataForUbuntu(spec, ng)
 	case api.NodeImageFamilyBottlerocket:
 		return NewUserDataForBottlerocket(spec, ng)
 	default:

@@ -1,10 +1,14 @@
 package iamoidc
 
 import (
+	"crypto/sha1"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"net/http"
+	"os/exec"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -14,9 +18,29 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gexec"
 
 	"github.com/weaveworks/eksctl/pkg/testutils/mockprovider"
 )
+
+var thumbprint string
+
+var _ = BeforeSuite(func() {
+	session, err := gexec.Start(exec.Command("make", "-C", "testdata", "all"), GinkgoWriter, GinkgoWriter)
+	Expect(err).NotTo(HaveOccurred())
+	Eventually(session, 3).Should(gexec.Exit())
+	rawCert, err := ioutil.ReadFile("testdata/test-server.pem")
+	Expect(err).NotTo(HaveOccurred())
+	block, rest := pem.Decode(rawCert)
+	Expect(rest).To(BeEmpty())
+	thumbprint = fmt.Sprintf("%x", sha1.Sum(block.Bytes))
+})
+
+var _ = AfterSuite(func() {
+	session, err := gexec.Start(exec.Command("make", "-C", "testdata", "clean"), GinkgoWriter, GinkgoWriter)
+	Expect(err).NotTo(HaveOccurred())
+	Eventually(session, 3).Should(gexec.Exit())
+})
 
 var _ = Describe("EKS/IAM API wrapper", func() {
 	const (
@@ -80,13 +104,11 @@ var _ = Describe("EKS/IAM API wrapper", func() {
 			oidc.insecureSkipVerify = true
 
 			err = oidc.getIssuerCAThumbprint()
+			Expect(srv.close()).To(Succeed())
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(oidc.issuerCAThumbprint).ToNot(BeEmpty())
-
-			Expect(oidc.issuerCAThumbprint).To(Equal("8b453cc675feb77c65163b7a9907d77994386664"))
-
-			Expect(srv.close()).To(Succeed())
+			Expect(oidc.issuerCAThumbprint).To(Equal(thumbprint))
 		})
 
 		It("should get OIDC issuer's CA fingerprint for a URL that returns 403", func() {
@@ -103,13 +125,11 @@ var _ = Describe("EKS/IAM API wrapper", func() {
 			oidc.insecureSkipVerify = true
 
 			err = oidc.getIssuerCAThumbprint()
+			Expect(srv.close()).To(Succeed())
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(oidc.issuerCAThumbprint).ToNot(BeEmpty())
-
-			Expect(oidc.issuerCAThumbprint).To(Equal("8b453cc675feb77c65163b7a9907d77994386664"))
-
-			Expect(srv.close()).To(Succeed())
+			Expect(oidc.issuerCAThumbprint).To(Equal(thumbprint))
 		})
 	})
 
@@ -168,9 +188,7 @@ var _ = Describe("EKS/IAM API wrapper", func() {
 				}
 				return false
 			})).Return(nil, nil)
-		})
 
-		JustBeforeEach(func() {
 			oidc, err = NewOpenIDConnectManager(p.IAM(), "12345", "https://localhost:10028/", "aws")
 			Expect(err).NotTo(HaveOccurred())
 
@@ -181,29 +199,21 @@ var _ = Describe("EKS/IAM API wrapper", func() {
 				_ = srv.serve()
 			}()
 
-			{
-				exists, err := oidc.CheckProviderExists()
-				Expect(err).NotTo(HaveOccurred())
-				Expect(exists).To(BeFalse())
-				Expect(oidc.ProviderARN).To(BeEmpty())
-			}
-
 			oidc.insecureSkipVerify = true
 
 			err = oidc.CreateProvider()
 			Expect(err).NotTo(HaveOccurred())
 
-			{
-				exists, err := oidc.CheckProviderExists()
-				Expect(err).NotTo(HaveOccurred())
-				Expect(exists).To(BeTrue())
-				Expect(oidc.ProviderARN).To(Equal(fakeProviderARN))
-			}
+			exists, err := oidc.CheckProviderExists()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(exists).To(BeTrue())
+			Expect(oidc.ProviderARN).To(Equal(fakeProviderARN))
 
 		})
 
-		JustAfterEach(func() {
+		AfterEach(func() {
 			Expect(srv.close()).To(Succeed())
+			Expect(oidc.DeleteProvider()).NotTo(HaveOccurred())
 		})
 
 		It("delete existing OIDC provider and check it no longer exists", func() {
@@ -220,7 +230,7 @@ var _ = Describe("EKS/IAM API wrapper", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(exists).To(BeTrue())
 
-			document := oidc.MakeAssumeRolePolicyDocument("test-ns1", "test-sa1")
+			document := oidc.MakeAssumeRolePolicyDocumentWithServiceAccountConditions("test-ns1", "test-sa1")
 			Expect(document).ToNot(BeEmpty())
 
 			expected := `{
@@ -235,6 +245,37 @@ var _ = Describe("EKS/IAM API wrapper", func() {
 						"Condition": {
 							"StringEquals": {
 								"localhost/:sub": "system:serviceaccount:test-ns1:test-sa1",
+								"localhost/:aud": "sts.amazonaws.com"
+							}
+						}
+					}
+				]
+			}`
+
+			js, err := json.Marshal(document)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(js).To(MatchJSON(expected))
+		})
+
+		It("should construct assume role policy document", func() {
+			exists, err := oidc.CheckProviderExists()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(exists).To(BeTrue())
+
+			document := oidc.MakeAssumeRolePolicyDocument()
+			Expect(document).ToNot(BeEmpty())
+
+			expected := `{
+				"Version": "2012-10-17",
+				"Statement": [
+					{
+						"Effect": "Allow",
+						"Principal": {
+							"Federated": "` + fakeProviderARN + `"
+						},
+						"Action": ["sts:AssumeRoleWithWebIdentity"],
+						"Condition": {
+							"StringEquals": {
 								"localhost/:aud": "sts.amazonaws.com"
 							}
 						}
@@ -265,7 +306,7 @@ var _ = Describe("EKS/IAM API wrapper", func() {
 			}()
 		})
 
-		AfterEach(func() {
+		JustAfterEach(func() {
 			srv.close()
 		})
 
@@ -285,7 +326,7 @@ var _ = Describe("EKS/IAM API wrapper", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(oidc.CreateProvider()).To(Succeed())
 
-			document := oidc.MakeAssumeRolePolicyDocument("test-ns", "test-sa")
+			document := oidc.MakeAssumeRolePolicyDocumentWithServiceAccountConditions("test-ns", "test-sa")
 			expected := fmt.Sprintf(`{
 				"Version": "2012-10-17",
 				"Statement": [

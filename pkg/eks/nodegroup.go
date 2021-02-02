@@ -1,13 +1,18 @@
 package eks
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/arn"
+	awsiam "github.com/aws/aws-sdk-go/service/iam"
 	"github.com/kris-nova/logger"
 	"github.com/pkg/errors"
 
+	addons "github.com/weaveworks/eksctl/pkg/addons/default"
 	"github.com/weaveworks/eksctl/pkg/cfn/manager"
 	"github.com/weaveworks/eksctl/pkg/iam"
 	"github.com/weaveworks/eksctl/pkg/utils"
@@ -15,6 +20,7 @@ import (
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
@@ -31,7 +37,7 @@ func isNodeReady(node *corev1.Node) bool {
 }
 
 func getNodes(clientSet kubernetes.Interface, ng KubeNodeGroup) (int, error) {
-	nodes, err := clientSet.CoreV1().Nodes().List(ng.ListOptions())
+	nodes, err := clientSet.CoreV1().Nodes().List(context.TODO(), ng.ListOptions())
 	if err != nil {
 		return 0, err
 	}
@@ -186,6 +192,7 @@ func LogWindowsCompatibility(nodeGroups []KubeNodeGroup, clusterMeta *api.Cluste
 	}
 }
 
+//go:generate "${GOBIN}/mockery" --name=KubeNodeGroup --output=mocks/
 // KubeNodeGroup defines a set of Kubernetes Nodes
 type KubeNodeGroup interface {
 	// NameString returns the name
@@ -207,7 +214,7 @@ func (c *ClusterProvider) WaitForNodes(clientSet kubernetes.Interface, ng KubeNo
 	timer := time.After(c.Provider.WaitTimeout())
 	timeout := false
 	readyNodes := sets.NewString()
-	watcher, err := clientSet.CoreV1().Nodes().Watch(ng.ListOptions())
+	watcher, err := clientSet.CoreV1().Nodes().Watch(context.TODO(), ng.ListOptions())
 	if err != nil {
 		return errors.Wrap(err, "creating node watcher")
 	}
@@ -275,4 +282,45 @@ func (c *ClusterProvider) GetNodeGroupIAM(stackManager *manager.StackCollection,
 	}
 
 	return fmt.Errorf("stack not found for nodegroup %q", ng.Name)
+}
+
+func getAWSNodeSAARNAnnotation(clientSet kubernetes.Interface) (string, error) {
+	clusterDaemonSet, err := clientSet.CoreV1().ServiceAccounts(metav1.NamespaceSystem).Get(context.TODO(), addons.AWSNode, metav1.GetOptions{})
+	if err != nil {
+		if apierrs.IsNotFound(err) {
+			logger.Warning("%q was not found", addons.AWSNode)
+			return "", nil
+		}
+		return "", errors.Wrapf(err, "getting %q", addons.AWSNode)
+	}
+
+	return clusterDaemonSet.Annotations[api.AnnotationEKSRoleARN], nil
+}
+
+func DoesAWSNodeUseIRSA(provider api.ClusterProvider, clientSet kubernetes.Interface) (bool, error) {
+	roleArn, err := getAWSNodeSAARNAnnotation(clientSet)
+	if err != nil {
+		return false, errors.Wrap(err, "error retrieving aws-node arn")
+	}
+	if roleArn == "" {
+		return false, nil
+	}
+	arnParts := strings.Split(roleArn, "/")
+	if len(arnParts) <= 1 {
+		return false, errors.Errorf("invalid ARN %s", roleArn)
+	}
+	input := awsiam.ListAttachedRolePoliciesInput{
+		RoleName: aws.String(arnParts[len(arnParts)-1]),
+	}
+	policies, err := provider.IAM().ListAttachedRolePolicies(&input)
+	if err != nil {
+		return false, errors.Wrap(err, "error listing attached policies")
+	}
+	logger.Debug("found following policies attached to role annotated on aws-node service account: %s", policies.AttachedPolicies)
+	for _, p := range policies.AttachedPolicies {
+		if *p.PolicyName == api.IAMPolicyAmazonEKSCNIPolicy {
+			return true, nil
+		}
+	}
+	return false, nil
 }

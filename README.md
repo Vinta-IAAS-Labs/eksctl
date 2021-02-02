@@ -19,6 +19,13 @@ curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/d
 sudo mv /tmp/eksctl /usr/local/bin
 ```
 
+For ARM system, please change ARCH (e.g. armv6, armv7 or arm64) accordingly
+
+```
+curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_arm64.tar.gz" | tar xz -C /tmp
+sudo mv /tmp/eksctl /usr/local/bin
+```
+
 Alternatively, macOS users can use [Homebrew](https://brew.sh):
 
 ```
@@ -46,6 +53,10 @@ or [environment variables][awsenv]. For more information read [AWS documentation
 
 You will also need [AWS IAM Authenticator for Kubernetes](https://github.com/kubernetes-sigs/aws-iam-authenticator) command (either `aws-iam-authenticator` or `aws eks get-token` (available in version 1.16.156 or greater of AWS CLI) in your `PATH`.
 
+### Docker
+
+For every release and RC a docker image is pushed to [weaveworks/eksctl](https://hub.docker.com/r/weaveworks/eksctl).
+
 ## Basic usage
 
 To create a basic cluster, run:
@@ -61,7 +72,6 @@ A cluster will be created with default parameters
 - use official AWS EKS AMI
 - `us-west-2` region
 - dedicated VPC (check your quotas)
-- using static AMI resolver
 
 Once you have created a cluster, you will find that cluster credentials were added in `~/.kube/config`. If you have `kubectl` v1.10.x as well as `aws-iam-authenticator` commands in your PATH, you should be
 able to use `kubectl`. You will need to make sure to use the same AWS API credentials for this also. Check [EKS docs][ekskubectl] for instructions. If you installed `eksctl` via Homebrew, you should have all of these dependencies installed already.

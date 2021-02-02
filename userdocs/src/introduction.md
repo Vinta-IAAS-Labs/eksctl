@@ -23,12 +23,12 @@ eksctl create cluster --name=cluster-1 --nodes=4
 
 ```
 
-EKS supports versions `1.14`, `1.15`, `1.16` and `1.17` (default).
+EKS supports versions `1.15`, `1.16`, `1.17` and `1.18` (default).
 With `eksctl` you can deploy any of the supported versions by passing `--version`.
 
 ```
 
-eksctl create cluster --version=1.17
+eksctl create cluster --version=1.18
 
 ```
 
@@ -119,6 +119,17 @@ eksctl create cluster --ssh-access --ssh-public-key=my_kubernetes_key --region=u
 
 ```
 
+To use [AWS Systems Manager (SSM)](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-sessions-start.html#sessions-start-cli) to SSH onto nodes, you can specify the `--enable-ssm` flag:
+
+```
+
+eksctl create cluster --enable-ssm
+
+```
+
+!!! note
+    If you are creating managed nodes with a custom launch template, the `--enable-ssm` flag is disallowed.
+
 ### Tagging
 
 To add custom tags for all resources, use `--tags`.
@@ -202,6 +213,10 @@ or [environment variables][awsenv]. For more information read [AWS documentation
 
 You will also need [AWS IAM Authenticator for Kubernetes](https://github.com/kubernetes-sigs/aws-iam-authenticator) command (either `aws-iam-authenticator` or `aws eks get-token` (available in version 1.16.156 or greater of AWS CLI) in your `PATH`.
 
+### Docker
+
+For every release and RC a docker image is pushed to [weaveworks/eksctl](https://hub.docker.com/r/weaveworks/eksctl).
+
 ### Shell Completion
 
 #### Bash
@@ -240,6 +255,15 @@ The below commands can be used for fish auto completion:
 ```
 mkdir -p ~/.config/fish/completions
 eksctl completion fish > ~/.config/fish/completions/eksctl.fish
+```
+
+#### Powershell
+
+The below command can be referred for setting it up. Please note that the path might be different depending on your
+system settings.
+
+```
+eksctl completion powershell > C:\Users\Documents\WindowsPowerShell\Scripts\eksctl.ps1
 ```
 
 ## Features

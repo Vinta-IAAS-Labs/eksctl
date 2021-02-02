@@ -2,13 +2,11 @@ package eks_test
 
 import (
 	"fmt"
-	"io/ioutil"
-	"os"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	cfn "github.com/aws/aws-sdk-go/service/cloudformation"
 	awseks "github.com/aws/aws-sdk-go/service/eks"
-
 	"github.com/kris-nova/logger"
 
 	. "github.com/onsi/ginkgo"
@@ -24,22 +22,18 @@ import (
 
 var _ = Describe("EKS API wrapper", func() {
 	var (
-		c      *ClusterProvider
-		p      *mockprovider.MockProvider
-		output string
+		c *ClusterProvider
+		p *mockprovider.MockProvider
 	)
 
-	BeforeEach(func() {
-		output = "json"
-	})
+	Describe("GetClusters", func() {
+		var (
+			clusterName string
+			err         error
+			cluster     *awseks.Cluster
+		)
 
-	Describe("ListAll", func() {
-		Context("With a cluster name", func() {
-			var (
-				clusterName string
-				err         error
-			)
-
+		When("the cluster is ready", func() {
 			BeforeEach(func() {
 				clusterName = "test-cluster"
 
@@ -62,11 +56,15 @@ var _ = Describe("EKS API wrapper", func() {
 				})
 
 				JustBeforeEach(func() {
-					err = c.ListClusters(clusterName, 100, output, false)
+					cluster, err = c.GetCluster(clusterName)
 				})
 
 				It("should not error", func() {
 					Expect(err).NotTo(HaveOccurred())
+				})
+
+				It("should return the cluster", func() {
+					Expect(cluster).To(Equal(testutils.NewFakeCluster(clusterName, awseks.ClusterStatusActive)))
 				})
 
 				It("should have called AWS EKS service once", func() {
@@ -114,11 +112,15 @@ var _ = Describe("EKS API wrapper", func() {
 				})
 
 				JustBeforeEach(func() {
-					err = c.ListClusters(clusterName, 100, output, false)
+					cluster, err = c.GetCluster(clusterName)
 				})
 
 				It("should not error", func() {
 					Expect(err).NotTo(HaveOccurred())
+				})
+
+				It("should return the cluster", func() {
+					Expect(cluster).To(Equal(testutils.NewFakeCluster(clusterName, awseks.ClusterStatusActive)))
 				})
 
 				It("should have called AWS EKS service once", func() {
@@ -131,20 +133,8 @@ var _ = Describe("EKS API wrapper", func() {
 			})
 		})
 
-		Context("with a cluster name but cluster isn't ready", func() {
-			var (
-				clusterName    string
-				err            error
-				originalStdout *os.File
-				reader         *os.File
-				writer         *os.File
-			)
-
+		When("the cluster is not ready", func() {
 			BeforeEach(func() {
-				originalStdout = os.Stdout
-				reader, writer, _ = os.Pipe()
-				os.Stdout = writer
-
 				clusterName = "test-cluster"
 				logger.Level = 1
 
@@ -162,11 +152,7 @@ var _ = Describe("EKS API wrapper", func() {
 			})
 
 			JustBeforeEach(func() {
-				err = c.ListClusters(clusterName, 100, output, false)
-			})
-
-			AfterEach(func() {
-				os.Stdout = originalStdout
+				cluster, err = c.GetCluster(clusterName)
 			})
 
 			It("should not error", func() {
@@ -180,27 +166,20 @@ var _ = Describe("EKS API wrapper", func() {
 			It("should not call AWS CFN ListStacksPages", func() {
 				Expect(p.MockCloudFormation().AssertNumberOfCalls(GinkgoT(), "ListStacksPages", 0)).To(BeTrue())
 			})
-
-			It("the output should equal the golden file singlecluster_deleting.golden", func() {
-				writer.Close()
-				g, err := ioutil.ReadFile("testdata/singlecluster_deleting.golden")
-				if err != nil {
-					GinkgoT().Fatalf("failed reading .golden: %s", err)
-				}
-
-				actualOutput, _ := ioutil.ReadAll(reader)
-
-				Expect(actualOutput).Should(MatchJSON(string(g)))
-			})
 		})
 
-		Context("with no cluster name", func() {
-			var (
-				err       error
-				chunkSize int
-			)
+	})
 
-			Context("and chunk-size of 1", func() {
+	Describe("ListAll", func() {
+		var (
+			err       error
+			chunkSize int
+			clusters  []*api.ClusterConfig
+		)
+
+		When("and chunk-size of 1", func() {
+			When("the clusters are not eksctl created", func() {
+
 				var (
 					callNumber int
 				)
@@ -230,56 +209,118 @@ var _ = Describe("EKS API wrapper", func() {
 					p.MockEKS().On("ListClusters", mock.MatchedBy(func(input *awseks.ListClustersInput) bool {
 						return *input.MaxResults == int64(chunkSize)
 					})).Return(mockResultFn, nil)
+
+					p.MockCloudFormation().On("ListStacksPages", mock.Anything, mock.Anything).Return(nil)
 				})
 
 				JustBeforeEach(func() {
-					err = c.ListClusters("", chunkSize, output, false)
+					clusters, err = c.ListClusters(chunkSize, false)
 				})
 
 				It("should not error", func() {
 					Expect(err).NotTo(HaveOccurred())
+				})
+
+				It("should return a list of clusters", func() {
+					Expect(clusters).To(ConsistOf(
+						&api.ClusterConfig{
+							Metadata: &api.ClusterMeta{
+								Name:   "cluster-0",
+								Region: c.Provider.Region(),
+							},
+							Status: &api.ClusterStatus{
+								EKSCTLCreated: "False",
+							},
+						},
+						&api.ClusterConfig{
+							Metadata: &api.ClusterMeta{
+								Name:   "cluster-1",
+								Region: c.Provider.Region(),
+							},
+							Status: &api.ClusterStatus{
+								EKSCTLCreated: "False",
+							},
+						},
+					))
 				})
 
 				It("should have called AWS EKS service twice", func() {
 					Expect(p.MockEKS().AssertNumberOfCalls(GinkgoT(), "ListClusters", 2)).To(BeTrue())
 				})
-			})
-			Context("and chunk-size of 100", func() {
-				BeforeEach(func() {
-					chunkSize = 100
 
-					p = mockprovider.NewMockProvider()
-
-					c = &ClusterProvider{
-						Provider: p,
-					}
-
-					mockResultFn := func(_ *awseks.ListClustersInput) *awseks.ListClustersOutput {
-						output := &awseks.ListClustersOutput{
-							Clusters: []*string{aws.String("cluster-1"), aws.String("cluster-2")},
-						}
-						return output
-					}
-
-					p.MockEKS().On("ListClusters", mock.MatchedBy(func(input *awseks.ListClustersInput) bool {
-						return *input.MaxResults == int64(chunkSize)
-					})).Return(mockResultFn, nil)
-				})
-
-				JustBeforeEach(func() {
-					err = c.ListClusters("", chunkSize, output, false)
-				})
-
-				It("should not error", func() {
-					Expect(err).NotTo(HaveOccurred())
-				})
-
-				It("should have called AWS EKS service once", func() {
-					Expect(p.MockEKS().AssertNumberOfCalls(GinkgoT(), "ListClusters", 1)).To(BeTrue())
+				It("should check if the clusters are eksctl created", func() {
+					Expect(p.MockCloudFormation().AssertNumberOfCalls(GinkgoT(), "ListStacksPages", 1)).To(BeTrue())
 				})
 			})
 		})
 
+		Context("and chunk-size of 100", func() {
+			BeforeEach(func() {
+				chunkSize = 100
+
+				p = mockprovider.NewMockProvider()
+
+				c = &ClusterProvider{
+					Provider: p,
+				}
+
+				mockResultFn := func(_ *awseks.ListClustersInput) *awseks.ListClustersOutput {
+					output := &awseks.ListClustersOutput{
+						Clusters: []*string{aws.String("cluster-1"), aws.String("cluster-2")},
+					}
+					return output
+				}
+
+				p.MockEKS().On("ListClusters", mock.MatchedBy(func(input *awseks.ListClustersInput) bool {
+					return *input.MaxResults == int64(chunkSize)
+				})).Return(mockResultFn, nil)
+
+				p.MockCloudFormation().On("ListStacksPages", mock.Anything, mock.Anything).Return(nil)
+			})
+
+			JustBeforeEach(func() {
+				clusters, err = c.ListClusters(chunkSize, false)
+			})
+
+			It("should not error", func() {
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should have called AWS EKS service once", func() {
+				Expect(p.MockEKS().AssertNumberOfCalls(GinkgoT(), "ListClusters", 1)).To(BeTrue())
+			})
+		})
+	})
+
+	Describe("ListClusters when no clusters exist", func() {
+		It("should return empty slice", func() {
+			p = mockprovider.NewMockProvider()
+
+			c = &ClusterProvider{
+				Provider: p,
+				Status:   &ProviderStatus{},
+			}
+
+			mockResultFn := func(_ *awseks.ListClustersInput) *awseks.ListClustersOutput {
+				output := &awseks.ListClustersOutput{
+					Clusters: []*string{},
+				}
+				return output
+			}
+
+			chunkSize := 1
+
+			p.MockEKS().On("ListClusters", mock.MatchedBy(func(input *awseks.ListClustersInput) bool {
+				return *input.MaxResults == int64(chunkSize)
+			})).Return(mockResultFn, nil)
+
+			p.MockCloudFormation().On("ListStacksPages", mock.Anything, mock.Anything).Return(nil)
+
+			clusters, err := c.ListClusters(chunkSize, false)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(clusters).ToNot(BeNil())
+			Expect(len(clusters)).To(Equal(0))
+		})
 	})
 
 	Describe("can get OIDC issuer URL and host fingerprint", func() {
@@ -328,6 +369,39 @@ var _ = Describe("EKS API wrapper", func() {
 
 			_, err := ctl.NewOpenIDConnectManager(cfg)
 			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
+	Describe("CanDelete", func() {
+		cfg := api.NewClusterConfig()
+		It("not yet created clusters are deletable", func() {
+			p = mockprovider.NewMockProvider()
+
+			c = &ClusterProvider{
+				Provider: p,
+				Status:   &ProviderStatus{},
+			}
+
+			p.MockEKS().On("DescribeCluster", mock.Anything).
+				Return(nil, awserr.New(awseks.ErrCodeResourceNotFoundException, "", nil))
+
+			canDelete, err := c.CanDelete(cfg)
+			Expect(canDelete).To(BeTrue())
+			Expect(err).NotTo(HaveOccurred())
+		})
+		It("forwards API errors", func() {
+			p = mockprovider.NewMockProvider()
+
+			c = &ClusterProvider{
+				Provider: p,
+				Status:   &ProviderStatus{},
+			}
+
+			p.MockEKS().On("DescribeCluster", mock.Anything).
+				Return(nil, awserr.New(awseks.ErrCodeBadRequestException, "", nil))
+
+			_, err := c.CanDelete(cfg)
+			Expect(err).To(HaveOccurred())
 		})
 	})
 

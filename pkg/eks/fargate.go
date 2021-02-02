@@ -3,11 +3,11 @@ package eks
 import (
 	"time"
 
+	"github.com/aws/aws-sdk-go/service/eks"
 	"github.com/kris-nova/logger"
 	"github.com/pkg/errors"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/weaveworks/eksctl/pkg/fargate"
 	"github.com/weaveworks/eksctl/pkg/fargate/coredns"
 	"github.com/weaveworks/eksctl/pkg/utils/retry"
 	"github.com/weaveworks/eksctl/pkg/utils/strings"
@@ -15,33 +15,42 @@ import (
 	api "github.com/weaveworks/eksctl/pkg/apis/eksctl.io/v1alpha5"
 )
 
+//go:generate counterfeiter -o fakes/fargate_client.go . FargateClient
+type FargateClient interface {
+	CreateProfile(profile *api.FargateProfile, waitForCreation bool) error
+}
+
 type fargateProfilesTask struct {
 	info            string
 	clusterProvider *ClusterProvider
 	spec            *api.ClusterConfig
+	manager         FargateClient
 }
 
 func (fpt *fargateProfilesTask) Describe() string { return fpt.info }
 
 func (fpt *fargateProfilesTask) Do(errCh chan error) error {
 	defer close(errCh)
-	if err := DoCreateFargateProfiles(fpt.spec, fpt.clusterProvider); err != nil {
+	if err := DoCreateFargateProfiles(fpt.spec, fpt.manager); err != nil {
 		return err
 	}
+	// Make sure control plane is reachable
 	clientSet, err := fpt.clusterProvider.NewStdClientSet(fpt.spec)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "failed to get ClientSet")
+	}
+	if err := fpt.clusterProvider.WaitForControlPlane(fpt.spec.Metadata, clientSet); err != nil {
+		return errors.Wrap(err, "failed to wait for control plane")
 	}
 	if err := ScheduleCoreDNSOnFargateIfRelevant(fpt.spec, fpt.clusterProvider, clientSet); err != nil {
-		return err
+		return errors.Wrap(err, "failed to schedule core-dns on fargate")
 	}
 	return nil
 }
 
 // DoCreateFargateProfiles creates fargate profiles as specified in the config
-func DoCreateFargateProfiles(config *api.ClusterConfig, ctl *ClusterProvider) error {
+func DoCreateFargateProfiles(config *api.ClusterConfig, fargateClient FargateClient) error {
 	clusterName := config.Metadata.Name
-	awsClient := fargate.NewClientWithWaitTimeout(clusterName, ctl.Provider.EKS(), ctl.Provider.WaitTimeout())
 	for _, profile := range config.FargateProfiles {
 		logger.Info("creating Fargate profile %q on EKS cluster %q", profile.Name, clusterName)
 
@@ -50,15 +59,20 @@ func DoCreateFargateProfiles(config *api.ClusterConfig, ctl *ClusterProvider) er
 		if profile.PodExecutionRoleARN == "" {
 			profile.PodExecutionRoleARN = strings.EmptyIfNil(config.IAM.FargatePodExecutionRoleARN)
 		}
-		// Linearise the creation of Fargate profiles by passing
-		// wait = true, as the API otherwise errors out with:
-		//   ResourceInUseException: Cannot create Fargate Profile
-		//   ${name2} because cluster ${clusterName} currently has
-		//   Fargate profile ${name1} in status CREATING
-		if err := awsClient.CreateProfile(profile, true); err != nil {
+		// Linearise the initial creation of Fargate profiles by passing
+		// wait = true, as the API otherwise errors out with a ResourceInUseException
+		//
+		// In the case that a ResourceInUseException is thrown on a profile which was
+		// created on an earlier call, we do not error but continue to the next one
+		err := fargateClient.CreateProfile(profile, true)
+		switch errors.Cause(err).(type) {
+		case nil:
+			logger.Info("created Fargate profile %q on EKS cluster %q", profile.Name, clusterName)
+		case *eks.ResourceInUseException:
+			logger.Info("Either Fargate profile %q already exists on EKS cluster %q or another profile is being created/deleted, no action taken", profile.Name, clusterName)
+		default:
 			return errors.Wrapf(err, "failed to create Fargate profile %q on EKS cluster %q", profile.Name, clusterName)
 		}
-		logger.Info("created Fargate profile %q on EKS cluster %q", profile.Name, clusterName)
 	}
 	return nil
 }
